@@ -5,11 +5,11 @@ from contextlib import contextmanager
 
 from CLient_db import Base
 
-class ServerDBManager:
+class ClientDBManager:
     """
     This class manages the underlying database. It checks if database exists, if not, create one. It then returns the *session* needed to operate database.
     """
-    
+
     def __init__(self, db_name="cdb.db"):
         self.db_name = db_name
         self.db_url = f"sqlite:///{db_name}"
@@ -20,16 +20,16 @@ class ServerDBManager:
 
     def _initialize_database(self):
         """Chekc and init db"""
-        
+
         db_exists = os.path.exists(self.db_name)
-        
+
         # Create engine
         self.engine = create_engine(
             self.db_url, 
             connect_args={"check_same_thread": False},
             echo=False
         )
-        
+
         # Create Session
         self.SessionLocal = sessionmaker(
             autocommit=False, 
@@ -68,4 +68,5 @@ class ServerDBManager:
         finally:
             session.close()
 
-session = ServerDBManager()
+if __name__ == "__main__":
+    session = ClientDBManager()

@@ -68,4 +68,5 @@ class ServerDBManager:
         finally:
             session.close()
 
-session = ServerDBManager().get_session()
+if __name__ == "__main__":
+    session = ServerDBManager().get_session()

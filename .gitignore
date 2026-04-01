@@ -1,0 +1,11 @@
+# python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# sqlite files
+*.db
+*.sqlite3
+
+# test files
+test_dbs.py
