@@ -35,60 +35,62 @@
 
 Store on Server side:
 
-Table Login_Information:
-    Email                            PK
-    UUID                             FK
-    User Name                        FK
+Table User:
+    UUID                             PK
+    Email                            Att (Unique)
+    User Name                        Att
     Password Hash                    Att
     Public keys                      Att
 
-Table User:
-    UUID                             PK
-    Devices                          FK
-    User Name                        Att
-    Opt_token                        Att
-    Friends                          Att
-    Friend Request Received          Att
-    Friend Request Sent              Att
-
 Table Devices:
     DeviceID                         PK
-    UUID                             FK
+    User UUID                        FK (ref User.UUID)
     Device Hash                      Att
     Device public key                Att
-    Is Verified                      Att
 
 Table Friendship:
     Relation_id                      PK
-    user_id                          FK
-    user_id                          FK
+    user_id                          FK (ref User.UUID)
+    user_id                          FK (ref User.UUID)
+    Status                           Att 
 
 Table Friend Request
     Request ID                       PK
-    Sender                           FK
-    Receiver                         FK
-    Status                           Att
+    Sender                           FK (ref User.UUID)
+    Receiver                         FK (ref User.UUID)
+    Status                           Att 
     Expire Duration                  Att
 
-
+Table Offline Message
+    Message ID                       PK
+    Sender UUID                      FK (ref User.UUID)
+    Receiver UUID                    FK (ref User.UUID)
+    Ciphertext                       Att 
+    Expire Duration                  Att 
 
 Store on Client Side:
 
 Table Local Identity:
-    UUID                             PK
+    UUID                             PK 
     Public_key                       Att
     Private_key                      Att
 
 Table Conversation:
-    Contact UUID                     PK
+    Contact UUID                     PK 
     Contact Name                     Att
     Unread Threads                   Att
-    Messages                         Att
+
+Table Contact Devices:
+    Contact Device ID                PK
+    Contact UUID                     FK (Ref Conversation.Contact UUID)
+    Public Key                       Att
+    Is Verified                      Att    
 
 Table Message:
     Message ID                       PK
-    Conversation ID                  FK
+    Conversation ID                  FK (References Conversation.Contact UUID)
     Sender ID                        Att
     Receiver ID                      Att
     Content Plaintext                Att
     Expire Duration                  Att
+    Receive At                       Att
