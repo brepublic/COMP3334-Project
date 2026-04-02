@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, String, Integer, ForeignKey, DateTime
+from sqlalchemy import Column, String, Integer, ForeignKey, DateTime, UniqueConstraint
 from sqlalchemy.orm import declarative_base, relationship
 from datetime import datetime, timezone
 
@@ -17,7 +17,6 @@ class User(Base):
     email = Column(String, unique=True, nullable=False)
     user_name = Column(String, nullable=False)
     password_hash = Column(String, nullable=False)
-    public_keys = Column(String, nullable=True) # 按照你的设计保留
 
     # Set foreign Keys
     devices = relationship("Device", back_populates="user", cascade="all, delete-orphan")
@@ -49,7 +48,8 @@ class Friendship(Base):
     user_uuid_1 = Column(String, ForeignKey('users.uuid'), nullable=False)
     user_uuid_2 = Column(String, ForeignKey('users.uuid'), nullable=False)
     status = Column(String, nullable=False) 
-
+    blocked_by = Column(String, nullable=True) #only store the initiator's UUID, or BOTH
+    __table_args__ = (UniqueConstraint('user_uuid_1', 'user_uuid_2', name='_user1_user2_uc'),)
 
 #------------------------------------Friend Request---------------------------------
 class FriendRequest(Base):

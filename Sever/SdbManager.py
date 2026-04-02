@@ -12,6 +12,7 @@ class ServerDBManager:
     
     def __init__(self, db_name="sdb.db"):
         self.db_name = db_name
+        # Automatically create a database if not found.
         self.db_url = f"sqlite:///{db_name}"
         self.engine = None
         self.SessionLocal = None
@@ -20,30 +21,13 @@ class ServerDBManager:
 
     def _initialize_database(self):
         """Chekc and init db"""
-        
-        db_exists = os.path.exists(self.db_name)
-        
-        # Create engine
-        self.engine = create_engine(
-            self.db_url, 
-            connect_args={"check_same_thread": False},
-            echo=False
-        )
-        
-        # Create Session
-        self.SessionLocal = sessionmaker(
-            autocommit=False, 
-            autoflush=False, 
-            bind=self.engine
-        )
+        # It's an interest design I copied from other code. SQL Alchemy only verify if the TABLES exist regardless of underlying database. Chaning self.db_url's value won't affect SQL alchemy's reading. 
+        self.engine = create_engine(self.db_url, connect_args={"check_same_thread": False}, echo=False)
+        self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
 
-        # Check if db already exist
-        if not db_exists:
-            print(f" Database '{self.db_name}' Doesn't exist, now initialize.")
-            Base.metadata.create_all(bind=self.engine)
-            print("Database initialization complete.")
-        else:
-            print(f"Database exists, now create session.")
+        # SQL Alchemy will decide if it needs to create a database.
+        Base.metadata.create_all(bind=self.engine)
+        print("Database initialization/verification complete.")
 
     def _get_session(self):
         """

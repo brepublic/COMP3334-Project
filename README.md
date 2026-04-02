@@ -94,3 +94,21 @@ Table Message:
     Content Plaintext                Att
     Expire Duration                  Att
     Receive At                       Att
+
+
+# API First Coding & Async Coding
+This project uses API First design, where the communication streams between server and client are predefined————before either server or client is written. It use *pydantic* and *FastAPI* together to achieve low cost, efficient communication between server and client.
+*pydantic* is use to predefine the communication protocol between client and server, as well as offers a input validation against malicious request. 
+*FastAPI* is used to handle input and output validation to make program faster. FastAPI also provides a websocket functionality so that we can save much time in managing websockets.
+
+
+Instead of multi-threading, this project uses asynchronus libraries to handle multiple inputs. Python's base design made it horrible in multithread performance, so asyn coding is a better choice.
+
+
+# Python Decorators
+Evil motherfuckers. 
+Modern Python code implements lots of "declarative coding" and "meta coding". @ is used to convert functions into library specific functions with registered functionalities. It saves us time from manually register each function after we wrote them.
+
+# About @contextmanager and yield
+伟大，无需多言。
+
