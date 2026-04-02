@@ -1,0 +1,6 @@
+# python libraries
+argon2-cffi
+sqlalchemy
+fastapi
+pyjwt
+pydantic-settings

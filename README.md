@@ -1,8 +1,8 @@
 # Divided project into modules:
- - [ ] 1. Register and Login
+ - [x] 1. Register and Login
     a. Register with email, hash password + salt and store in database
     b. Support password login and onetime password
-    c. Generate token bind with current login session, supports log out and expires.
+    c. Generate token bind with current login session, supports log out and expires. (Client manually deletes token when log out.)
 
  - [ ] 2. Identity key management for users
     a. Store private key in device, public in server
@@ -109,6 +109,5 @@ Instead of multi-threading, this project uses asynchronus libraries to handle mu
 Evil motherfuckers. 
 Modern Python code implements lots of "declarative coding" and "meta coding". @ is used to convert functions into library specific functions with registered functionalities. It saves us time from manually register each function after we wrote them.
 
-# About @contextmanager and yield
-伟大，无需多言。
-
+# Separation of Concern
+FastAPI doesn't use traditional class design, since it gets obese after implementing many classes. **Separation of Concern** design better divides the task, making one file focuses on one task only. They will be later incorporated in using FastAPI Router.

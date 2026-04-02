@@ -17,6 +17,7 @@ class User(Base):
     email = Column(String, unique=True, nullable=False)
     user_name = Column(String, nullable=False)
     password_hash = Column(String, nullable=False)
+    otp_secret = Column(String, nullable=False)
 
     # Set foreign Keys
     devices = relationship("Device", back_populates="user", cascade="all, delete-orphan")
