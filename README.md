@@ -15,12 +15,12 @@
     c. Somehow make sure that message isn't tampered with when sent
     d. Making sure there is no replay attack
 
- - [ ] 4. Contact management
+ - [x] 4. Contact management
     a. Send, receive and accept friend request
     b. Block and unblock
     c. default message limit to one
 
- - [ ] 5. Offline Messages
+ - [x] 5. Offline Messages
     a. Show two status for sent message: delivered, unreceived
     b. Offline deliver queue
     c. delete if waiting too long
@@ -111,3 +111,6 @@ Modern Python code implements lots of "declarative coding" and "meta coding". @ 
 
 # Separation of Concern
 FastAPI doesn't use traditional class design, since it gets obese after implementing many classes. **Separation of Concern** design better divides the task, making one file focuses on one task only. They will be later incorporated in using FastAPI Router.
+
+# Limiter
+Using SlowAPI to limit the amount of login and register request from an ip

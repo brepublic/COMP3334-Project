@@ -3,9 +3,10 @@
 import pyotp
 import jwt
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
+from limitor import limiter
 
 # self defined modules
 from Schema import LoginRequest, LoginResponse
@@ -37,6 +38,7 @@ def create_access_token(data: dict, expires_delta: timedelta):
 
 
 @router.post("/login", response_model=LoginResponse)
+@limiter.limit("5/minute")
 def login_user(request: LoginRequest, db=Depends(get_db)):
     """User login -> validate password -> validate OTP -> Sign device -> Sign JWT"""
     
@@ -57,20 +59,15 @@ def login_user(request: LoginRequest, db=Depends(get_db)):
         raise HTTPException(status_code=401, detail="Incorret OTP or time out")
 
     
-    # Validate device
-    # Check if device exists
-    existing_device = db.query(Device).filter(
-        Device.user_uuid == user.uuid,
-        Device.device_hash == request.device_hash
-    ).first()
-    # Register devie is doesn't exist
-    if not existing_device:
-        new_device = Device(
-            user_uuid=user.uuid,
-            device_hash=request.device_hash,
-            device_public_key=request.device_public_key
-        )
-        db.add(new_device)
+    # Delete the previous devices. Supports only single device login.
+    db.query(Device).filter(Device.user_uuid == user.uuid).delete()
+    # Create the entry for the new device.
+    new_device = Device(
+        user_uuid=user.uuid,
+        device_hash=request.device_hash,
+        device_public_key=request.device_public_key
+    )
+    db.add(new_device)
 
     # Sign JWT
     access_token_expires = timedelta(days=settings.ACCESS_TOKEN_EXPIRE_DAYS)

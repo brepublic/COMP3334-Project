@@ -4,3 +4,6 @@ sqlalchemy
 fastapi
 pyjwt
 pydantic-settings
+uvicorn
+email-validator
+slowapi

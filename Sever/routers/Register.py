@@ -1,12 +1,12 @@
 # routers/Register
 
 import pyotp
-from fastapi import HTTPException, Depends, APIRouter
+from fastapi import HTTPException, Depends, APIRouter, Request
 from argon2 import PasswordHasher
+from limitor import limiter
 
 from Schema import RegisterRequest, RegisterResponse
 from Server_db import User
-from SdbManager import ServerDBManager
 from Dependency import get_db
 
 
@@ -15,6 +15,7 @@ router = APIRouter(tags=["Register"])
 ph = PasswordHasher() # 
 
 @router.post("/register", response_model=RegisterResponse)
+@limiter.limit("3/day")
 def register_user(request: RegisterRequest, db=Depends(get_db)):
     """New user register -> hash pw -> generate OTP -> store in db"""
     existing_user = db.query(User).filter(User.email == request.email).first()

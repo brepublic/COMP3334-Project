@@ -49,7 +49,7 @@ class Friendship(Base):
     user_uuid_1 = Column(String, ForeignKey('users.uuid'), nullable=False)
     user_uuid_2 = Column(String, ForeignKey('users.uuid'), nullable=False)
     status = Column(String, nullable=False) 
-    blocked_by = Column(String, nullable=True) #only store the initiator's UUID, or BOTH
+    blocked_by = Column(String, nullable=True) 
     __table_args__ = (UniqueConstraint('user_uuid_1', 'user_uuid_2', name='_user1_user2_uc'),)
 
 #------------------------------------Friend Request---------------------------------

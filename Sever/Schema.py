@@ -62,6 +62,9 @@ class FriendInfo(BaseModel):
 class FriendListResponse(BaseModel):
     friends: List[FriendInfo]
 
+class BlockUserRequest(BaseModel):
+    target_uuid: str
+
 
 #-------------------------------Offline Message and Self Destroy Module-------------------------
 
