@@ -1,6 +1,6 @@
 Terminal A:
 
-cd /Users/tj/Downloads/project/COMP3334
+
 export CLIENT_STATE_PATH=/tmp/client-a-state.json
 export CLIENT_DB_PATH=/tmp/client-a.db
 python3 -m Client.main register --email alice@example.com --user-name alice --password password123
@@ -14,7 +14,7 @@ Store the OTP secret in your authenticator app before logging in.
 
 Terminal B:
 
-cd /Users/tj/Downloads/project/COMP3334
+
 export CLIENT_STATE_PATH=/tmp/client-b-state.json
 export CLIENT_DB_PATH=/tmp/client-b.db
 python3 -m Client.main register --email bob@example.com --user-name bob --password password123
