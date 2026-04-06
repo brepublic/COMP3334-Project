@@ -1,9 +1,12 @@
-import os
+from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from contextlib import contextmanager
 
-from Client_db import Base
+if __package__:
+    from .CLient_db import Base
+else:
+    from CLient_db import Base
 
 class ClientDBManager:
     """
@@ -11,8 +14,8 @@ class ClientDBManager:
     """
 
     def __init__(self, db_name="cdb.db"):
-        self.db_name = db_name
-        self.db_url = f"sqlite:///{db_name}"
+        self.db_name = Path(db_name).expanduser()
+        self.db_url = f"sqlite:///{self.db_name}"
         self.engine = None
         self.SessionLocal = None
         #Automatically check and init database        
@@ -20,6 +23,7 @@ class ClientDBManager:
 
     def _initialize_database(self):
         """Chekc and init db"""
+        self.db_name.parent.mkdir(parents=True, exist_ok=True)
         self.engine = create_engine(self.db_url, connect_args={"check_same_thread": False}, echo=False)
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
 

@@ -39,23 +39,23 @@ def create_access_token(data: dict, expires_delta: timedelta):
 
 @router.post("/login", response_model=LoginResponse)
 @limiter.limit("5/minute")
-def login_user(request: LoginRequest, db=Depends(get_db)):
+def login_user(request: Request, payload: LoginRequest, db=Depends(get_db)):
     """User login -> validate password -> validate OTP -> Sign device -> Sign JWT"""
     
     # find user first
-    user = db.query(User).filter(User.email == request.email).first()
+    user = db.query(User).filter(User.email == payload.email).first()
     if not user:
         raise HTTPException(status_code=401, detail="Email or password is wrong.")
 
     # validate password
     try:
-        ph.verify(user.password_hash, request.password)
+        ph.verify(user.password_hash, payload.password)
     except VerifyMismatchError:
         raise HTTPException(status_code=401, detail="Email or password is wrong")
 
     # Validate OTP
     totp = pyotp.TOTP(user.otp_secret)
-    if not totp.verify(request.otp_code):
+    if not totp.verify(payload.otp_code):
         raise HTTPException(status_code=401, detail="Incorret OTP or time out")
 
     
@@ -64,8 +64,8 @@ def login_user(request: LoginRequest, db=Depends(get_db)):
     # Create the entry for the new device.
     new_device = Device(
         user_uuid=user.uuid,
-        device_hash=request.device_hash,
-        device_public_key=request.device_public_key
+        device_hash=payload.device_hash,
+        device_public_key=payload.device_public_key
     )
     db.add(new_device)
 

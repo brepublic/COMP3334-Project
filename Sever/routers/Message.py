@@ -50,6 +50,7 @@ def send_message(
         expire_duration=request.expire_duration
     )
     db.add(new_message)
+    db.flush()
 
     return SendMessageResponse(
         message_id=new_message.message_id,
