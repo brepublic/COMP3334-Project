@@ -194,6 +194,54 @@ def _short_text(value: str, limit: int = 40) -> str:
     return value[: limit - 3] + "..."
 
 
+def _format_fingerprint_for_display(fingerprint: str | None) -> str:
+    if not fingerprint:
+        return "-"
+    cleaned = "".join(ch for ch in fingerprint if ch.isalnum()).upper()
+    if not cleaned:
+        return "-"
+    return " ".join(cleaned[idx : idx + 4] for idx in range(0, len(cleaned), 4))
+
+
+def _choose_friend_by_username(friends: list, username: str):
+    matches = [f for f in friends if f.user_name == username]
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+    return _select_friend_interactively(matches, "Multiple users share this username:")
+
+
+def _resolve_contact_uuid(runtime: ClientRuntime, contact_identifier: str) -> str:
+    api = build_api(runtime)
+    try:
+        friends_response = run_api_call(api.list_friends)
+    finally:
+        api.close()
+
+    # Prefer exact UUID match first.
+    uuid_matches = [f for f in friends_response.friends if f.uuid == contact_identifier]
+    if len(uuid_matches) == 1:
+        return uuid_matches[0].uuid
+
+    email_matches = [
+        f for f in friends_response.friends if (f.email or "").lower() == contact_identifier.lower()
+    ]
+    if len(email_matches) == 1:
+        return email_matches[0].uuid
+    if len(email_matches) > 1:
+        selected = _select_friend_interactively(email_matches, "Multiple users share this email:")
+        if not selected:
+            raise typer.BadParameter("Could not resolve contact from email.")
+        return selected.uuid
+
+    selected_by_username = _choose_friend_by_username(friends_response.friends, contact_identifier)
+    if selected_by_username:
+        return selected_by_username.uuid
+
+    raise typer.BadParameter("Contact not found. Use UUID, email, or username from friends list.")
+
+
 def _ensure_conversation_exists(db_manager: ClientDBManager, contact_uuid: str) -> None:
     with db_manager.get_session() as db:
         conversation = db.get(Conversation, contact_uuid)
@@ -225,7 +273,6 @@ def _sync_contact_keys(runtime: ClientRuntime, contact_uuid: str) -> ContactKeyS
         ).scalars().all()
         by_device_id = {item.contact_device_id: item for item in existing_devices}
         active_device_ids = {device.device_id for device in response.active_devices}
-
         for device in response.active_devices:
             new_hash = key_fingerprint(device.device_public_key)
             current = by_device_id.get(device.device_id)
@@ -368,6 +415,12 @@ def _parse_utc_ts(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _to_utc_if_naive(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
 def _touch_conversation(
     db_manager: ClientDBManager,
     contact_uuid: str,
@@ -437,11 +490,12 @@ def _cleanup_expired_local_messages(db_manager: ClientDBManager) -> int:
         expired_ids: list[str] = []
         for row in rows:
             if row.expires_at:
-                expires_at = row.expires_at
+                expires_at = _to_utc_if_naive(row.expires_at)
             else:
-                received = row.receive_at or now
+                received = _to_utc_if_naive(row.receive_at) if row.receive_at else now
                 expires_at = received + timedelta(seconds=max(0, int(row.expire_duration or 0)))
-            if expires_at <= now:
+            should_expire = expires_at <= now
+            if should_expire:
                 expired_ids.append(row.message_id)
         if not expired_ids:
             return 0
@@ -633,13 +687,10 @@ def remove_friend(username: str):
     api = build_api(runtime)
     try:
         response = run_api_call(api.list_friends)
-        matches = [f for f in response.friends if f.user_name == username]
-        if not matches:
+        selected = _choose_friend_by_username(response.friends, username)
+        if not selected:
             typer.echo(f"No friend found with username: {username}")
             return
-        selected = matches[0] if len(matches) == 1 else _select_friend_interactively(
-            matches, "Multiple users share this username:"
-        )
         remove_response = run_api_call(lambda: api.remove_friend(selected.uuid))
     finally:
         api.close()
@@ -761,7 +812,6 @@ def _send_chat_payload(runtime: ClientRuntime, receiver_uuid: str, message: str,
     ciphertext = AESGCM(session_key).encrypt(nonce, message.encode("utf-8"), aad)
     envelope["ciphertext"] = base64.b64encode(ciphertext).decode("ascii")
     envelope_blob = json.dumps(envelope, separators=(",", ":"))
-
     api = build_api(runtime)
     try:
         response = run_api_call(
@@ -811,13 +861,10 @@ def chat(
         return
 
     if username:
-        matches = [f for f in friends_response.friends if f.user_name == username]
-        if not matches:
+        selected = _choose_friend_by_username(friends_response.friends, username)
+        if not selected:
             typer.echo(f"No friend found with username: {username}")
             return
-        selected = matches[0] if len(matches) == 1 else _select_friend_interactively(
-            matches, "Multiple users share this username:"
-        )
     else:
         with runtime.db_manager.get_session() as db:
             latest_by_contact = {}
@@ -1127,11 +1174,25 @@ def sync_contact_keys(contact_uuid: str):
         )
 
 
-@app.command("show-fingerprints")
-def show_fingerprints(contact_uuid: str, refresh: bool = typer.Option(True, "--refresh/--no-refresh")):
+def _show_fingerprints_impl(
+    contact_identifier: str,
+    refresh: bool = True,
+    show_device_id: bool = False,
+) -> None:
     """Show device fingerprints and verification state for a contact."""
     runtime = build_runtime()
     require_login(runtime)
+    contact_uuid = _resolve_contact_uuid(runtime, contact_identifier)
+    contact_email = contact_uuid
+    api = build_api(runtime)
+    try:
+        friends_response = run_api_call(api.list_friends)
+    finally:
+        api.close()
+    for friend in friends_response.friends:
+        if friend.uuid == contact_uuid:
+            contact_email = str(friend.email) if friend.email else friend.uuid
+            break
     if refresh:
         _sync_contact_keys(runtime, contact_uuid)
 
@@ -1146,9 +1207,62 @@ def show_fingerprints(contact_uuid: str, refresh: bool = typer.Option(True, "--r
 
     output_rows = []
     for item in rows:
-        status = "VERIFIED" if item.is_verified else "UNVERIFIED"
-        output_rows.append([item.contact_device_id, status, item.fingerprint or "-"])
-    _print_columns(["DeviceID", "Status", "Fingerprint"], output_rows)
+        status = "verified" if item.is_verified else "unverified"
+        if show_device_id:
+            output_rows.append(
+                [
+                    contact_email,
+                    item.contact_device_id,
+                    status,
+                    _format_fingerprint_for_display(item.fingerprint),
+                ]
+            )
+        else:
+            output_rows.append(
+                [
+                    contact_email,
+                    status,
+                    _format_fingerprint_for_display(item.fingerprint),
+                ]
+            )
+    if show_device_id:
+        _print_columns(["Email", "DeviceID", "Status", "Fingerprint"], output_rows)
+        return
+    _print_columns(["Email", "Status", "Fingerprint"], output_rows)
+
+
+@app.command("show-fingerprints")
+def show_fingerprints(
+    contact_identifier: str = typer.Argument(
+        ...,
+        metavar="CONTACT_IDENTIFIER",
+        help="Contact identifier: friend UUID, email, or username.",
+    ),
+    refresh: bool = typer.Option(True, "--refresh/--no-refresh"),
+    show_device_id: bool = typer.Option(False, "--show-device-id"),
+):
+    _show_fingerprints_impl(
+        contact_identifier=contact_identifier,
+        refresh=refresh,
+        show_device_id=show_device_id,
+    )
+
+
+@app.command("show--fingerprints")
+def show_fingerprints_alias(
+    contact_identifier: str = typer.Argument(
+        ...,
+        metavar="CONTACT_IDENTIFIER",
+        help="Contact identifier: friend UUID, email, or username.",
+    ),
+    refresh: bool = typer.Option(True, "--refresh/--no-refresh"),
+    show_device_id: bool = typer.Option(False, "--show-device-id"),
+):
+    _show_fingerprints_impl(
+        contact_identifier=contact_identifier,
+        refresh=refresh,
+        show_device_id=show_device_id,
+    )
 
 
 @app.command("verify-device")
@@ -1198,7 +1312,7 @@ def my_fingerprint():
     fingerprint = key_fingerprint(identity.public_key)
     typer.echo(f"user_uuid={runtime.state.user_uuid}")
     typer.echo(f"device_id={runtime.state.local_device_id}")
-    typer.echo(f"fingerprint={fingerprint}")
+    typer.echo(f"fingerprint={_format_fingerprint_for_display(fingerprint)}")
 
 
 @app.command("conversations")

@@ -22,7 +22,6 @@ def send_message(
     db = Depends(get_db),
     current_user_uuid: str = Depends(get_current_user)
 ):
-    
     # Check if Friend exists
     receiver = db.query(User).filter(User.uuid == request.receiver_uuid).first()
     if not receiver:
