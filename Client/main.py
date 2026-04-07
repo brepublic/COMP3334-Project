@@ -235,6 +235,13 @@ def _remember_session_password(password: str) -> None:
         _SESSION_PASSWORD = password
 
 
+def _unlock_local_identity(runtime: ClientRuntime, password: str):
+    try:
+        return ensure_local_identity(runtime.db_manager, password)
+    except Exception as exc:
+        raise typer.BadParameter("Incorrect password for local identity key.") from exc
+
+
 def _print_columns(headers: list[str], rows: list[list[str]]) -> None:
     if not headers:
         return
@@ -833,11 +840,16 @@ async def _auto_receiver_ws_loop(runtime: ClientRuntime, identity) -> None:
     assert runtime.state.access_token
     backoff = 1
     while not _AUTO_RECEIVER_STOP.is_set():
+        websocket = None
         try:
             websocket = await connect_chat_socket(runtime.settings.websocket_url, runtime.state.access_token)
             backoff = 1
             while not _AUTO_RECEIVER_STOP.is_set():
-                raw = await asyncio.wait_for(websocket.recv(), timeout=1.0)
+                try:
+                    raw = await asyncio.wait_for(websocket.recv(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    # Idle timeout is normal; keep the current socket open and continue waiting.
+                    continue
                 if isinstance(raw, bytes):
                     raw = raw.decode("utf-8")
                 payload = json.loads(raw)
@@ -851,11 +863,15 @@ async def _auto_receiver_ws_loop(runtime: ClientRuntime, identity) -> None:
                     )
                 ]
                 _process_incoming_messages(runtime, identity, incoming, output=True, acknowledge=False)
-        except asyncio.TimeoutError:
-            continue
         except Exception:
             await asyncio.sleep(min(backoff, AUTO_PULL_BACKOFF_MAX_SECONDS))
             backoff = min(backoff * 2, AUTO_PULL_BACKOFF_MAX_SECONDS)
+        finally:
+            if websocket is not None:
+                try:
+                    await websocket.close()
+                except Exception:
+                    pass
 
 
 def _auto_receiver_worker() -> None:
@@ -1218,7 +1234,7 @@ def _show_recent_chat(runtime: ClientRuntime, contact_uuid: str, limit: int = 12
 def _send_chat_payload(runtime: ClientRuntime, receiver_uuid: str, message: str, ttl: int, password: str) -> None:
     if not runtime.state.user_uuid:
         raise typer.BadParameter("No saved user UUID found. Run login first.")
-    identity = ensure_local_identity(runtime.db_manager, password)
+    identity = _unlock_local_identity(runtime, password)
     _ensure_conversation_exists(runtime.db_manager, receiver_uuid)
     sync_result = _sync_contact_keys(runtime, receiver_uuid)
     _warn_changed_devices(receiver_uuid, sync_result.changed_devices)
@@ -1332,6 +1348,7 @@ def chat(
     _cleanup_expired_local_messages(runtime.db_manager)
     _touch_conversation(runtime.db_manager, selected.uuid, contact_name=selected.user_name, clear_unread=True)
     password = typer.prompt("Password", hide_input=True)
+    _unlock_local_identity(runtime, password)
     _remember_session_password(password)
     _start_auto_receiver_if_possible(runtime)
     default_ttl = 86400
@@ -1390,7 +1407,7 @@ def pull(
         typer.secho(f"Cleaned {expired} expired local message(s).", fg=typer.colors.BLUE)
     if not runtime.state.user_uuid:
         raise typer.BadParameter("No saved user UUID found. Run login first.")
-    identity = ensure_local_identity(runtime.db_manager, password)
+    identity = _unlock_local_identity(runtime, password)
     api = build_api(runtime)
     try:
         response = run_api_call(api.pull_messages)

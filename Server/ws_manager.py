@@ -13,6 +13,12 @@ class ConnectionManager:
 
     async def connect(self, websocket: WebSocket, user_uuid: str):
         """用户上线：接受连接并登记造册"""
+        previous = self.active_connections.get(user_uuid)
+        if previous is not None and previous is not websocket:
+            try:
+                await previous.close(code=1000)
+            except Exception:
+                pass
         await websocket.accept()
         self.active_connections[user_uuid] = websocket
         logger.info("WebSocket user connected: %s", user_uuid)

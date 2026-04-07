@@ -233,6 +233,8 @@ From Alice's terminal:
 python -m Client.main add-friend bob@example.com
 ```
 
+If you two are already friend, you will have an error message.
+
 From Bob's terminal, list incoming requests:
 
 ```bash
@@ -286,6 +288,7 @@ python -m Client.main chat bob
 ```
 
 Inside chat:
+- You will first enter your account password
 - typing plain text sends a normal message
 - `/ttl <seconds> <message>` sends a timed self-destruct message
 - `/refresh` reloads recent local chat history
