@@ -12,3 +12,6 @@ test_dbs.py
 
 # .venv
 .venv/
+
+# backup files
+*.bak

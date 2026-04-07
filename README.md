@@ -317,6 +317,19 @@ The client uses environment variables to choose where to store local state and t
 - `CLIENT_STATE_PATH` (e.g., `/tmp/client-a-state.json`)
 - `CLIENT_DB_PATH` (e.g., `/tmp/client-a.db`)
 
+Run a single command (existing behavior):
+- `python -m Client.main --help`
+- `python -m Client.main login --help`
+
+Run interactive CLI mode (new behavior):
+- Start REPL: `python -m Client.main interactive`
+- In REPL, execute normal command names directly, for example:
+  - `friends`
+  - `pending`
+  - `help chat`
+- Exit REPL with `exit`, `quit`, or `Ctrl+D`.
+- Pressing `Ctrl+C` inside REPL cancels current input and keeps the session running.
+
 Typical demo steps (two terminals, two users) are documented in:
 - `Client/ReadMe/what_to_test.md`
 

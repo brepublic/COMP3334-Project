@@ -2,9 +2,12 @@ from dataclasses import dataclass
 import base64
 import json
 import os
+import shlex
+import sys
 import uuid
 from datetime import datetime, timezone
 
+import click
 import pyotp
 import typer
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -60,6 +63,61 @@ class ContactKeySyncResult:
 
 PROTOCOL_VERSION = 1
 ENVELOPE_TYPE_CHAT = "CHAT"
+
+
+def _dispatch_cli_command(args: list[str]) -> None:
+    app(
+        args=args,
+        prog_name="client",
+        standalone_mode=False,
+    )
+
+
+def _run_interactive_shell() -> None:
+    typer.echo("Interactive mode started. Type 'help' for usage, 'exit' to quit.")
+    while True:
+        try:
+            raw = input("client> ").strip()
+        except EOFError:
+            typer.echo()
+            typer.echo("Exiting interactive mode.")
+            return
+        except KeyboardInterrupt:
+            typer.echo()
+            typer.echo("Use 'exit' or Ctrl+D to quit.")
+            continue
+
+        if not raw:
+            continue
+
+        lowered = raw.lower()
+        if lowered in {"exit", "quit"}:
+            typer.echo("Exiting interactive mode.")
+            return
+
+        try:
+            if lowered == "help":
+                args = ["--help"]
+            elif lowered.startswith("help "):
+                args = shlex.split(raw[5:])
+                args.append("--help")
+            else:
+                args = shlex.split(raw)
+        except ValueError as exc:
+            typer.secho(f"Parse error: {exc}", fg=typer.colors.RED, err=True)
+            continue
+
+        try:
+            _dispatch_cli_command(args)
+        except typer.Exit as exc:
+            if exc.exit_code not in (0, None):
+                continue
+        except click.ClickException as exc:
+            exc.show(file=sys.stderr)
+        except click.exceptions.Abort:
+            typer.secho("Command aborted.", fg=typer.colors.YELLOW, err=True)
+        except Exception as exc:
+            typer.secho(f"Unexpected error: {exc}", fg=typer.colors.RED, err=True)
 
 
 def build_runtime() -> ClientRuntime:
@@ -683,6 +741,12 @@ def unverified_keys():
             f"{item.contact_uuid}\t{item.contact_device_id}\t{item.fingerprint}",
             fg=typer.colors.YELLOW,
         )
+
+
+@app.command("interactive")
+def interactive():
+    """Run an interactive shell for executing multiple commands."""
+    _run_interactive_shell()
 
 
 if __name__ == "__main__":
