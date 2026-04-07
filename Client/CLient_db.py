@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, Integer, ForeignKey, Boolean, DateTime
+from sqlalchemy import Column, String, Integer, ForeignKey, Boolean, DateTime, Index
 from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
@@ -29,6 +29,7 @@ class Conversation(Base):
     contact_uuid = Column(String, primary_key=True)
     contact_name = Column(String, nullable=False)
     unread_threads = Column(Integer, default=0)
+    last_activity = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     # Delete related device is the contact is deleted
     devices = relationship("ContactDevice", back_populates="conversation", cascade="all, delete-orphan")
@@ -57,11 +58,18 @@ class Message(Base):
     receiver_id = Column(String, nullable=False)
     
     content_plaintext = Column(String, nullable=False)
-    
+    client_msg_id = Column(String, nullable=True, index=True)
+    message_type = Column(String, nullable=False, default="CHAT")
+    status = Column(String, nullable=False, default="SENT")
+    ack_client_msg_id = Column(String, nullable=True)
     expire_duration = Column(Integer, nullable=False)
     receive_at = Column(DateTime, default=lambda: datetime.now(timezone.utc)) 
+    expires_at = Column(DateTime, nullable=True)
 
     conversation = relationship("Conversation", back_populates="messages")
+
+
+Index("ix_messages_conversation_receive_at", Message.conversation_id, Message.receive_at.desc())
 
 
 class SeenMessage(Base):

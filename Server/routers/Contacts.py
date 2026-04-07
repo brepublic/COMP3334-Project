@@ -196,8 +196,9 @@ def get_contact_keys(
     # 2. Fetch active devices and their keys
     devices = db.query(Device).filter(Device.user_uuid == contact_uuid).all()
     
+    # Client uses login "device_hash" as local_device_id, so expose hash as routing id.
     device_infos = [
-        DeviceKeyInfo(device_id=d.device_id, device_public_key=d.device_public_key)
+        DeviceKeyInfo(device_id=d.device_hash, device_public_key=d.device_public_key)
         for d in devices
     ]
     

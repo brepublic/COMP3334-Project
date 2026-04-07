@@ -220,13 +220,14 @@ Notes on sensitive server-side secrets:
 - [x] **5. Offline messages (R20–R22)** — implemented
   - [x] implemented: ciphertext queue store-and-forward
   - [x] implemented: ACK/cleanup policy (ack delete + periodic expiry cleanup)
-- [ ] **6. Timed self-destruct (R10–R12)** — TODO
-  - [ ] TODO: TTL authenticated + client deletion + server best-effort deletion (server-side expiry cleanup exists; no AAD binding/client-side expiry deletion)
-- [ ] **7. Conversation list/unread/paging (R23–R25)** — TODO
-  - [ ] TODO: conversation list ordering + unread counters
-  - [ ] TODO: incremental history loading
-- [ ] **8. Delivery receipts semantics (R17–R19)** — TODO
-  - [ ] TODO: E2EE receipt messages define Delivered
+- [x] **6. Timed self-destruct (R10–R12)** — implemented
+  - [x] implemented: TTL is authenticated in AAD, and client performs local expiry cleanup before pull/history/conversations views
+  - [x] implemented: server best-effort expiry cleanup for queued ciphertext
+- [x] **7. Conversation list/unread/paging (R23–R25)** — implemented
+  - [x] implemented: `conversations` command ordered by `last_activity` and showing unread counters
+  - [x] implemented: `history <contact_uuid> --limit N --before <rfc3339>` incremental local pagination
+- [x] **8. Delivery receipts semantics (R17–R19)** — implemented
+  - [x] implemented: Delivered is defined by E2EE `RECEIPT` (recipient decrypts CHAT then sends encrypted receipt back)
 
 ---
 

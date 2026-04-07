@@ -154,8 +154,52 @@
   - run `pull`
   - expected: decrypt/validation fails, message is rejected
 
+  10. Delivered receipt semantics (E2EE RECEIPT)
+
+  From Alice:
+
+  python3 -m Client.main chat <bob_uuid> "receipt test" --ttl 300
+
+  From Bob:
+
+  python3 -m Client.main pull
+
+  From Alice:
+
+  python3 -m Client.main pull
+  python3 -m Client.main history <bob_uuid> --limit 20
+
+  Expected:
+
+  - Bob decrypts CHAT and auto-sends encrypted RECEIPT
+  - Alice pull shows `receipt-ack=... status=DELIVERED`
+  - Alice history shows original CHAT message with `DELIVERED` status
+
+  11. Self-destruct cleanup + conversation list + paging
+
+  Send a short TTL message:
+
+  python3 -m Client.main chat <bob_uuid> "short ttl" --ttl 5
+
+  Pull and wait for expiry:
+
+  python3 -m Client.main pull
+  sleep 6
+  python3 -m Client.main conversations
+  python3 -m Client.main history <bob_uuid> --limit 5
+
+  Pagination check:
+
+  python3 -m Client.main history <bob_uuid> --limit 2
+  python3 -m Client.main history <bob_uuid> --limit 2 --before 2026-04-07T00:00:00Z
+
+  Expected:
+
+  - expired message is removed by cleanup and no longer appears in history
+  - `conversations` lists contacts sorted by recent activity with unread counters
+  - `history` supports incremental loading with `--limit` and `--before`
+
   Known limitations (current scope):
 
   - no websocket listen command yet
-  - no conversation list/unread logic yet
   - identity key decryption depends on the login password provided to each command

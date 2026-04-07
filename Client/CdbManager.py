@@ -26,7 +26,12 @@ class ClientDBManager:
         """Chekc and init db"""
         self.db_name.parent.mkdir(parents=True, exist_ok=True)
         self.engine = create_engine(self.db_url, connect_args={"check_same_thread": False}, echo=False)
-        self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
+        self.SessionLocal = sessionmaker(
+            autocommit=False,
+            autoflush=False,
+            bind=self.engine,
+            expire_on_commit=False,
+        )
 
         # SQL Alchemy will decide if it needs to create a database.
         Base.metadata.create_all(bind=self.engine)
@@ -53,9 +58,16 @@ class ClientDBManager:
 
         self._add_column_if_missing("contact_devices", "fingerprint", "TEXT")
         self._add_column_if_missing("contact_devices", "last_seen_key_hash", "TEXT")
+        self._add_column_if_missing("conversations", "last_activity", "TEXT")
+        self._add_column_if_missing("messages", "client_msg_id", "TEXT")
+        self._add_column_if_missing("messages", "message_type", "TEXT DEFAULT 'CHAT'")
+        self._add_column_if_missing("messages", "status", "TEXT DEFAULT 'SENT'")
+        self._add_column_if_missing("messages", "ack_client_msg_id", "TEXT")
+        self._add_column_if_missing("messages", "expires_at", "TEXT")
         self._ensure_table_seen_messages()
         self._ensure_table_message_counters()
         self._ensure_counter_index()
+        self._ensure_message_indexes()
 
     def _table_exists(self, table_name: str) -> bool:
         with self.engine.connect() as conn:
@@ -109,6 +121,25 @@ class ClientDBManager:
                     """
                     CREATE UNIQUE INDEX IF NOT EXISTS ux_message_counters_scope
                     ON message_counters(conversation_id, peer_device_id, direction)
+                    """
+                )
+            )
+
+    def _ensure_message_indexes(self) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_messages_conversation_receive_at
+                    ON messages(conversation_id, receive_at DESC)
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_messages_client_msg_id
+                    ON messages(client_msg_id)
                     """
                 )
             )

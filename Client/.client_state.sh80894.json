@@ -1,6 +1,6 @@
 {
-  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhMTQ5NGFlMS1kN2ExLTRhYzktOGFhOC1iMDg4NmViZGQyYjciLCJpYXQiOjE3NzU1NTY1NjcsImV4cCI6MTc3NjE2MTM2NywianRpIjoiOTFlYzJiNzItOTAwYS00ODdlLWFiMmQtNzQxMjhlZmMxZDhjIn0.VVMHSxMMXzapo_07fRyPupOeBK2ITU2WPgSBK6l-TSM",
+  "access_token": null,
   "token_type": "bearer",
-  "user_uuid": "a1494ae1-d7a1-4ac9-8aa8-b0886ebdd2b7",
+  "user_uuid": null,
   "local_device_id": "b5fe7baa-a1e2-484f-9bcb-2bd3de747962"
 }

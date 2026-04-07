@@ -1,6 +1,7 @@
 # routers/ChatWS.py
 
 import jwt
+import uuid
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Query, HTTPException
 from jwt.exceptions import InvalidTokenError
 from datetime import datetime, timezone
@@ -72,9 +73,12 @@ async def websocket_endpoint(
                 # 被拉黑了，直接假装没看见，也不往下传
                 continue 
 
+            ws_message_id = str(uuid.uuid4())
+
             # 4. 尝试实时投递给 Bob
             forward_payload = {
                 "type": "NEW_MESSAGE",
+                "message_id": ws_message_id,
                 "sender_uuid": user_uuid,
                 "ciphertext": ciphertext,
                 "timestamp": datetime.now(timezone.utc).isoformat()

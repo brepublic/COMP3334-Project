@@ -5,7 +5,7 @@ import os
 import shlex
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import click
 import pyotp
@@ -13,11 +13,12 @@ import typer
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from qrcode import QRCode
 from sqlalchemy import select
+from sqlalchemy.orm import object_session
 
 if __package__:
     from .api import ChatClientAPI, ClientAPIError
     from .CdbManager import ClientDBManager
-    from .CLient_db import ContactDevice, Conversation, MessageCounter, SeenMessage
+    from .CLient_db import ContactDevice, Conversation, LocalIdentity, Message, MessageCounter, SeenMessage
     from .config import get_settings
     from .identity import ensure_local_identity, key_fingerprint, derive_session_key
     from .Schema import (
@@ -32,7 +33,7 @@ if __package__:
 else:
     from api import ChatClientAPI, ClientAPIError
     from CdbManager import ClientDBManager
-    from CLient_db import ContactDevice, Conversation, MessageCounter, SeenMessage
+    from CLient_db import ContactDevice, Conversation, LocalIdentity, Message, MessageCounter, SeenMessage
     from config import get_settings
     from identity import ensure_local_identity, key_fingerprint, derive_session_key
     from Schema import (
@@ -63,6 +64,28 @@ class ContactKeySyncResult:
 
 PROTOCOL_VERSION = 1
 ENVELOPE_TYPE_CHAT = "CHAT"
+ENVELOPE_TYPE_RECEIPT = "RECEIPT"
+DEBUG_LOG_PATH = "/home/makoto/COMP3334/.cursor/debug-186468.log"
+DEBUG_SESSION_ID = "186468"
+
+
+def _debug_log(run_id: str, hypothesis_id: str, location: str, message: str, data: dict) -> None:
+    # region agent log
+    payload = {
+        "sessionId": DEBUG_SESSION_ID,
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
+    }
+    try:
+        with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as fp:
+            fp.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    except Exception:
+        pass
+    # endregion
 
 
 def _dispatch_cli_command(args: list[str]) -> None:
@@ -159,6 +182,7 @@ def _ensure_conversation_exists(db_manager: ClientDBManager, contact_uuid: str) 
                 contact_uuid=contact_uuid,
                 contact_name=contact_uuid,
                 unread_threads=0,
+                last_activity=datetime.now(timezone.utc),
             )
         )
 
@@ -178,6 +202,7 @@ def _sync_contact_keys(runtime: ClientRuntime, contact_uuid: str) -> ContactKeyS
             select(ContactDevice).where(ContactDevice.contact_uuid == contact_uuid)
         ).scalars().all()
         by_device_id = {item.contact_device_id: item for item in existing_devices}
+        active_device_ids = {device.device_id for device in response.active_devices}
 
         for device in response.active_devices:
             new_hash = key_fingerprint(device.device_public_key)
@@ -202,6 +227,23 @@ def _sync_contact_keys(runtime: ClientRuntime, contact_uuid: str) -> ContactKeyS
             current.public_key = device.device_public_key
             current.fingerprint = new_hash
             current.last_seen_key_hash = new_hash
+
+        # Keep local cache aligned with server active device list to avoid selecting stale device ids.
+        db.query(ContactDevice).filter(
+            ContactDevice.contact_uuid == contact_uuid,
+            ContactDevice.contact_device_id.not_in(active_device_ids),
+        ).delete(synchronize_session=False)
+        _debug_log(
+            "post-fix",
+            "H10",
+            "Client/main.py:_sync_contact_keys:active-set",
+            "Synced and pruned contact device cache by server active devices",
+            {
+                "contact_uuid": contact_uuid,
+                "active_device_ids": sorted(active_device_ids),
+                "active_count": len(active_device_ids),
+            },
+        )
 
     return ContactKeySyncResult(
         changed_devices=changed_devices,
@@ -300,6 +342,106 @@ def _mark_seen_message(db_manager: ClientDBManager, client_msg_id: str, conversa
         )
 
 
+def _parse_utc_ts(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _touch_conversation(
+    db_manager: ClientDBManager,
+    contact_uuid: str,
+    *,
+    contact_name: str | None = None,
+    increase_unread: bool = False,
+    clear_unread: bool = False,
+    at: datetime | None = None,
+) -> None:
+    now = at or datetime.now(timezone.utc)
+    with db_manager.get_session() as db:
+        record = db.get(Conversation, contact_uuid)
+        if not record:
+            record = Conversation(
+                contact_uuid=contact_uuid,
+                contact_name=contact_name or contact_uuid,
+                unread_threads=0,
+                last_activity=now,
+            )
+            db.add(record)
+        if contact_name:
+            record.contact_name = contact_name
+        record.last_activity = now
+        if increase_unread:
+            record.unread_threads = (record.unread_threads or 0) + 1
+        if clear_unread:
+            record.unread_threads = 0
+
+
+def _save_message(
+    db_manager: ClientDBManager,
+    *,
+    conversation_id: str,
+    sender_id: str,
+    receiver_id: str,
+    content_plaintext: str,
+    ttl: int,
+    received_at: datetime,
+    client_msg_id: str | None,
+    message_type: str,
+    status: str,
+    ack_client_msg_id: str | None = None,
+) -> None:
+    expires_at = received_at + timedelta(seconds=max(0, int(ttl)))
+    with db_manager.get_session() as db:
+        db.add(
+            Message(
+                conversation_id=conversation_id,
+                sender_id=sender_id,
+                receiver_id=receiver_id,
+                content_plaintext=content_plaintext,
+                expire_duration=ttl,
+                receive_at=received_at,
+                client_msg_id=client_msg_id,
+                message_type=message_type,
+                status=status,
+                ack_client_msg_id=ack_client_msg_id,
+                expires_at=expires_at,
+            )
+        )
+
+
+def _cleanup_expired_local_messages(db_manager: ClientDBManager) -> int:
+    now = datetime.now(timezone.utc)
+    with db_manager.get_session() as db:
+        rows = db.execute(select(Message)).scalars().all()
+        expired_ids: list[str] = []
+        for row in rows:
+            if row.expires_at:
+                expires_at = row.expires_at
+            else:
+                received = row.receive_at or now
+                expires_at = received + timedelta(seconds=max(0, int(row.expire_duration or 0)))
+            if expires_at <= now:
+                expired_ids.append(row.message_id)
+        if not expired_ids:
+            return 0
+        db.query(Message).filter(Message.message_id.in_(expired_ids)).delete(synchronize_session=False)
+        return len(expired_ids)
+
+
+def _mark_outbound_delivered_by_client_msg_id(db_manager: ClientDBManager, conversation_id: str, ack_client_msg_id: str) -> bool:
+    with db_manager.get_session() as db:
+        msg = db.execute(
+            select(Message).where(
+                Message.conversation_id == conversation_id,
+                Message.client_msg_id == ack_client_msg_id,
+                Message.message_type == ENVELOPE_TYPE_CHAT,
+            )
+        ).scalars().first()
+        if not msg:
+            return False
+        msg.status = "DELIVERED"
+        return True
+
+
 def render_otp_qr_code(email: str, otp_secret: str) -> None:
     """Render a TOTP provisioning QR code in terminal-friendly ASCII."""
     provisioning_uri = pyotp.TOTP(otp_secret).provisioning_uri(
@@ -369,6 +511,16 @@ def login(
         access_token=response.access_token,
         token_type=response.token_type,
     )
+    _debug_log(
+        "post-fix",
+        "H6",
+        "Client/main.py:login:state",
+        "Login persisted auth and local device id",
+        {
+            "user_uuid": response.user_uuid,
+            "local_device_id": runtime.state.local_device_id,
+        },
+    )
     runtime.state.save(runtime.settings.state_path)
 
     typer.echo(f"Logged in as user UUID: {response.user_uuid}")
@@ -424,6 +576,11 @@ def friends_list():
         return
 
     for friend in response.friends:
+        _touch_conversation(
+            runtime.db_manager,
+            friend.uuid,
+            contact_name=friend.user_name,
+        )
         typer.echo(f"{friend.user_name}\t{friend.uuid}\t{friend.status}")
 
 
@@ -496,12 +653,70 @@ def chat(
     identity = ensure_local_identity(runtime.db_manager, password)
     _ensure_conversation_exists(runtime.db_manager, receiver_uuid)
     _sync_contact_keys(runtime, receiver_uuid)
+    device = None
     with runtime.db_manager.get_session() as db:
         device = db.execute(
             select(ContactDevice).where(ContactDevice.contact_uuid == receiver_uuid)
         ).scalars().first()
+        _debug_log(
+            "pre-fix",
+            "H2",
+            "Client/main.py:chat:db-select-device",
+            "Selected contact device in active session",
+            {
+                "receiver_uuid": receiver_uuid,
+                "device_found": device is not None,
+                "session_bound_before_close": object_session(device) is not None if device else False,
+                "db_expire_on_commit": bool(getattr(db, "expire_on_commit", False)),
+            },
+        )
+        _debug_log(
+            "post-fix",
+            "H11",
+            "Client/main.py:chat:local-device-candidates",
+            "Current local contact device candidates after sync",
+            {
+                "receiver_uuid": receiver_uuid,
+                "candidate_device_ids": [
+                    row.contact_device_id
+                    for row in db.execute(
+                        select(ContactDevice).where(ContactDevice.contact_uuid == receiver_uuid)
+                    ).scalars().all()
+                ],
+            },
+        )
+    _debug_log(
+        "pre-fix",
+        "H2",
+        "Client/main.py:chat:after-session-close",
+        "Contact device state immediately after session context",
+        {
+            "device_found": device is not None,
+            "session_bound_after_close": object_session(device) is not None if device else False,
+        },
+    )
     if not device:
         raise typer.BadParameter("No contact device key found. Run sync-contact-keys first.")
+    try:
+        _debug_log(
+            "pre-fix",
+            "H2",
+            "Client/main.py:chat:attr-access",
+            "Attempting detached-sensitive device attribute access",
+            {
+                "contact_device_id": device.contact_device_id,
+                "public_key_len": len(device.public_key or ""),
+            },
+        )
+    except Exception as exc:
+        _debug_log(
+            "pre-fix",
+            "H2",
+            "Client/main.py:chat:attr-access-error",
+            "Device attribute access failed",
+            {"error": str(exc)},
+        )
+        raise
 
     counter = _next_counter(runtime.db_manager, receiver_uuid, device.contact_device_id, "OUTBOUND")
     created_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -515,10 +730,11 @@ def chat(
         protocol_version=PROTOCOL_VERSION,
     )
     nonce = os.urandom(12)
+    client_msg_id = str(uuid.uuid4())
     envelope = {
         "v": PROTOCOL_VERSION,
         "type": ENVELOPE_TYPE_CHAT,
-        "client_msg_id": str(uuid.uuid4()),
+        "client_msg_id": client_msg_id,
         "sender_uuid": runtime.state.user_uuid,
         "receiver_uuid": receiver_uuid,
         "sender_device_id": runtime.state.local_device_id,
@@ -528,6 +744,18 @@ def chat(
         "created_at": created_at,
         "nonce": base64.b64encode(nonce).decode("ascii"),
     }
+    _debug_log(
+        "post-fix",
+        "H7",
+        "Client/main.py:chat:envelope-target",
+        "Prepared outbound envelope routing fields",
+        {
+            "sender_uuid": runtime.state.user_uuid,
+            "sender_device_id": runtime.state.local_device_id,
+            "receiver_uuid": receiver_uuid,
+            "receiver_device_id": device.contact_device_id,
+        },
+    )
     aad = _aad_metadata_bytes(envelope)
     ciphertext = AESGCM(session_key).encrypt(nonce, message.encode("utf-8"), aad)
     envelope["ciphertext"] = base64.b64encode(ciphertext).decode("ascii")
@@ -547,6 +775,21 @@ def chat(
     finally:
         api.close()
 
+    created_at_dt = _parse_utc_ts(created_at)
+    _save_message(
+        runtime.db_manager,
+        conversation_id=receiver_uuid,
+        sender_id=runtime.state.user_uuid,
+        receiver_id=receiver_uuid,
+        content_plaintext=message,
+        ttl=ttl,
+        received_at=created_at_dt,
+        client_msg_id=client_msg_id,
+        message_type=ENVELOPE_TYPE_CHAT,
+        status="SENT",
+    )
+    _touch_conversation(runtime.db_manager, receiver_uuid, at=created_at_dt)
+
     typer.echo(f"Server message ID: {response.message_id}")
     typer.echo(f"Server status: {response.status}")
 
@@ -559,6 +802,9 @@ def pull(
     """Pull offline messages and optionally ACK them."""
     runtime = build_runtime()
     require_login(runtime)
+    expired = _cleanup_expired_local_messages(runtime.db_manager)
+    if expired:
+        typer.secho(f"Cleaned {expired} expired local message(s).", fg=typer.colors.BLUE)
     if not runtime.state.user_uuid:
         raise typer.BadParameter("No saved user UUID found. Run login first.")
     identity = ensure_local_identity(runtime.db_manager, password)
@@ -595,14 +841,49 @@ def pull(
                 typer.secho(f"{item.message_id}\tmissing-envelope-fields", fg=typer.colors.YELLOW)
                 continue
 
-            if envelope["type"] != ENVELOPE_TYPE_CHAT:
+            if envelope["type"] not in {ENVELOPE_TYPE_CHAT, ENVELOPE_TYPE_RECEIPT}:
                 typer.secho(f"{item.message_id}\tunsupported-type={envelope['type']}", fg=typer.colors.YELLOW)
+                message_ids.append(item.message_id)
                 continue
             if envelope["receiver_uuid"] != runtime.state.user_uuid:
                 typer.secho(f"{item.message_id}\treceiver-mismatch", fg=typer.colors.YELLOW)
+                _debug_log(
+                    "post-fix",
+                    "H8",
+                    "Client/main.py:pull:receiver-mismatch",
+                    "Pulled message receiver_uuid mismatch",
+                    {
+                        "message_id": item.message_id,
+                        "envelope_receiver_uuid": envelope.get("receiver_uuid"),
+                        "local_user_uuid": runtime.state.user_uuid,
+                    },
+                )
                 continue
             if envelope["receiver_device_id"] != runtime.state.local_device_id:
                 typer.secho(f"{item.message_id}\treceiver-device-mismatch", fg=typer.colors.YELLOW)
+                _debug_log(
+                    "post-fix",
+                    "H9",
+                    "Client/main.py:pull:receiver-device-mismatch",
+                    "Pulled message receiver_device_id mismatch",
+                    {
+                        "message_id": item.message_id,
+                        "envelope_receiver_device_id": envelope.get("receiver_device_id"),
+                        "local_device_id": runtime.state.local_device_id,
+                        "envelope_sender_uuid": envelope.get("sender_uuid"),
+                    },
+                )
+                message_ids.append(item.message_id)
+                _debug_log(
+                    "post-fix",
+                    "H12",
+                    "Client/main.py:pull:receiver-device-mismatch-ack",
+                    "Acking mismatched-device message to prevent permanent retry",
+                    {
+                        "message_id": item.message_id,
+                        "receiver_uuid": envelope.get("receiver_uuid"),
+                    },
+                )
                 continue
 
             client_msg_id = envelope["client_msg_id"]
@@ -657,9 +938,97 @@ def pull(
 
             _mark_seen_message(runtime.db_manager, client_msg_id, sender_uuid, sender_device_id)
             _update_inbound_counter(runtime.db_manager, sender_uuid, sender_device_id, incoming_counter)
-            typer.echo(
-                f"{item.message_id}\tfrom={sender_uuid}\tcounter={incoming_counter}\tttl={envelope['ttl']}\tmessage={plaintext}"
-            )
+            created_at_dt = _parse_utc_ts(envelope["created_at"])
+            ttl = int(envelope["ttl"])
+            _touch_conversation(runtime.db_manager, sender_uuid, increase_unread=envelope["type"] == ENVELOPE_TYPE_CHAT, at=created_at_dt)
+
+            if envelope["type"] == ENVELOPE_TYPE_CHAT:
+                _save_message(
+                    runtime.db_manager,
+                    conversation_id=sender_uuid,
+                    sender_id=sender_uuid,
+                    receiver_id=runtime.state.user_uuid,
+                    content_plaintext=plaintext,
+                    ttl=ttl,
+                    received_at=created_at_dt,
+                    client_msg_id=client_msg_id,
+                    message_type=ENVELOPE_TYPE_CHAT,
+                    status="DELIVERED",
+                )
+                typer.echo(
+                    f"{item.message_id}\tfrom={sender_uuid}\tcounter={incoming_counter}\tttl={ttl}\tmessage={plaintext}"
+                )
+
+                receipt_counter = _next_counter(
+                    runtime.db_manager,
+                    sender_uuid,
+                    sender_device_id,
+                    "OUTBOUND",
+                )
+                receipt_created = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                receipt_nonce = os.urandom(12)
+                receipt_envelope = {
+                    "v": PROTOCOL_VERSION,
+                    "type": ENVELOPE_TYPE_RECEIPT,
+                    "client_msg_id": str(uuid.uuid4()),
+                    "sender_uuid": runtime.state.user_uuid,
+                    "receiver_uuid": sender_uuid,
+                    "sender_device_id": runtime.state.local_device_id,
+                    "receiver_device_id": sender_device_id,
+                    "counter": receipt_counter,
+                    "ttl": ttl,
+                    "created_at": receipt_created,
+                    "nonce": base64.b64encode(receipt_nonce).decode("ascii"),
+                }
+                receipt_payload = json.dumps({"ack_client_msg_id": client_msg_id}, separators=(",", ":")).encode("utf-8")
+                receipt_aad = _aad_metadata_bytes(receipt_envelope)
+                receipt_cipher = AESGCM(session_key).encrypt(receipt_nonce, receipt_payload, receipt_aad)
+                receipt_envelope["ciphertext"] = base64.b64encode(receipt_cipher).decode("ascii")
+                run_api_call(
+                    lambda: api.send_message(
+                        SendMessageRequest(
+                            receiver_uuid=sender_uuid,
+                            ciphertext=json.dumps(receipt_envelope, separators=(",", ":")),
+                            expire_duration=ttl,
+                        )
+                    )
+                )
+            else:
+                try:
+                    receipt_data = json.loads(plaintext)
+                except json.JSONDecodeError:
+                    typer.secho(f"{item.message_id}\tinvalid-receipt-body", fg=typer.colors.YELLOW)
+                    message_ids.append(item.message_id)
+                    continue
+                ack_client_msg_id = receipt_data.get("ack_client_msg_id")
+                if not ack_client_msg_id:
+                    typer.secho(f"{item.message_id}\treceipt-missing-ack-id", fg=typer.colors.YELLOW)
+                    message_ids.append(item.message_id)
+                    continue
+                updated = _mark_outbound_delivered_by_client_msg_id(runtime.db_manager, sender_uuid, ack_client_msg_id)
+                _save_message(
+                    runtime.db_manager,
+                    conversation_id=sender_uuid,
+                    sender_id=sender_uuid,
+                    receiver_id=runtime.state.user_uuid,
+                    content_plaintext=f"receipt:{ack_client_msg_id}",
+                    ttl=ttl,
+                    received_at=created_at_dt,
+                    client_msg_id=client_msg_id,
+                    message_type=ENVELOPE_TYPE_RECEIPT,
+                    status="DELIVERED",
+                    ack_client_msg_id=ack_client_msg_id,
+                )
+                if updated:
+                    typer.secho(
+                        f"{item.message_id}\treceipt-ack={ack_client_msg_id}\tstatus=DELIVERED",
+                        fg=typer.colors.GREEN,
+                    )
+                else:
+                    typer.secho(
+                        f"{item.message_id}\treceipt-ack={ack_client_msg_id}\tlocal-message-not-found",
+                        fg=typer.colors.YELLOW,
+                    )
             message_ids.append(item.message_id)
 
         if ack and message_ids:
@@ -741,6 +1110,108 @@ def unverified_keys():
             f"{item.contact_uuid}\t{item.contact_device_id}\t{item.fingerprint}",
             fg=typer.colors.YELLOW,
         )
+
+
+@app.command("my-fingerprint")
+def my_fingerprint():
+    """Show current user's local device fingerprint."""
+    runtime = build_runtime()
+    require_login(runtime)
+
+    with runtime.db_manager.get_session() as db:
+        identity = db.query(LocalIdentity).first()
+
+    if not identity:
+        typer.secho("No local identity key found. Please login first.", fg=typer.colors.YELLOW)
+        return
+
+    fingerprint = key_fingerprint(identity.public_key)
+    typer.echo(f"user_uuid={runtime.state.user_uuid}")
+    typer.echo(f"device_id={runtime.state.local_device_id}")
+    typer.echo(f"fingerprint={fingerprint}")
+
+
+@app.command("conversations")
+def conversations():
+    """List local conversations ordered by recent activity."""
+    runtime = build_runtime()
+    require_login(runtime)
+    expired = _cleanup_expired_local_messages(runtime.db_manager)
+    if expired:
+        typer.secho(f"Cleaned {expired} expired local message(s).", fg=typer.colors.BLUE)
+    with runtime.db_manager.get_session() as db:
+        rows = db.execute(
+            select(Conversation).order_by(Conversation.last_activity.desc())
+        ).scalars().all()
+        _debug_log(
+            "pre-fix",
+            "H1",
+            "Client/main.py:conversations:query",
+            "Fetched conversation rows in active session",
+            {
+                "rows_count": len(rows),
+                "db_expire_on_commit": bool(getattr(db, "expire_on_commit", False)),
+                "first_row_bound_before_close": object_session(rows[0]) is not None if rows else False,
+            },
+        )
+    _debug_log(
+        "pre-fix",
+        "H1",
+        "Client/main.py:conversations:after-session-close",
+        "Conversation rows state after session context",
+        {
+            "rows_count": len(rows),
+            "first_row_bound_after_close": object_session(rows[0]) is not None if rows else False,
+        },
+    )
+    if not rows:
+        typer.echo("No local conversations.")
+        return
+    for row in rows:
+        try:
+            ts = row.last_activity.isoformat() if row.last_activity else "-"
+            typer.echo(f"{row.contact_uuid}\t{row.contact_name}\tunread={row.unread_threads}\tlast_activity={ts}")
+        except Exception as exc:
+            _debug_log(
+                "pre-fix",
+                "H1",
+                "Client/main.py:conversations:row-access-error",
+                "Conversation row attribute access failed",
+                {"error": str(exc)},
+            )
+            raise
+
+
+@app.command("history")
+def history(
+    contact_uuid: str,
+    limit: int = typer.Option(20, "--limit", min=1, max=200),
+    before: str | None = typer.Option(None, "--before", help="RFC3339 timestamp; load messages older than this value."),
+):
+    """Show paged local message history for one conversation."""
+    runtime = build_runtime()
+    require_login(runtime)
+    expired = _cleanup_expired_local_messages(runtime.db_manager)
+    if expired:
+        typer.secho(f"Cleaned {expired} expired local message(s).", fg=typer.colors.BLUE)
+    before_dt = _parse_utc_ts(before) if before else None
+    with runtime.db_manager.get_session() as db:
+        query = select(Message).where(Message.conversation_id == contact_uuid)
+        if before_dt:
+            query = query.where(Message.receive_at < before_dt)
+        rows = db.execute(query.order_by(Message.receive_at.desc()).limit(limit)).scalars().all()
+    if not rows:
+        typer.echo("No local history for this conversation.")
+        _touch_conversation(runtime.db_manager, contact_uuid, clear_unread=True)
+        return
+    for row in rows:
+        ts = row.receive_at.isoformat() if row.receive_at else "-"
+        ack = f"\tack={row.ack_client_msg_id}" if row.ack_client_msg_id else ""
+        client_id = row.client_msg_id or "-"
+        typer.echo(
+            f"{ts}\t{row.message_type}\t{row.status}\tclient_msg_id={client_id}{ack}\t{row.content_plaintext}"
+        )
+    _touch_conversation(runtime.db_manager, contact_uuid, clear_unread=True)
 
 
 @app.command("interactive")
