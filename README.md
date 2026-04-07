@@ -200,14 +200,32 @@ Notes on sensitive server-side secrets:
 ---
 
 ## Roadmap / module checklist (tracked against spec)
-- [x] **1. Register & Login (R1–R3)**\n  - register with email/username, store Argon2-hashed password\n  - login with password + TOTP\n  - session token expiry + logout/session invalidation
-- [ ] **2. Identity key management (R4–R6)**\n  - per-device identity keypair stored locally (encrypted)\n  - server stores device public keys\n  - fingerprint display + verified flag\n  - key change detection (warn + re-verify policy)
-- [ ] **3. E2EE messaging (R7–R9)**\n  - session establishment via X25519 + HKDF\n  - AEAD per message + AAD-bound metadata\n  - replay/dedup via client_msg_id + counters
-- [x] **4. Contact management (R13–R16)**\n  - request/accept/decline; block/unblock\n  - default anti-spam: non-friends cannot message
-- [x] **5. Offline messages (R20–R22)**\n  - ciphertext queue store-and-forward\n  - ACK/cleanup policy
-- [ ] **6. Timed self-destruct (R10–R12)**\n  - TTL authenticated + client deletion + server best-effort deletion
-- [ ] **7. Conversation list/unread/paging (R23–R25)**\n  - conversation list ordering + unread counters\n  - incremental history loading
-- [ ] **8. Delivery receipts semantics (R17–R19)**\n  - E2EE receipt messages define Delivered
+- [ ] **1. Register & Login (R1–R3)** — implemented
+  - [x] implemented: register with email/username, store Argon2-hashed password
+  - [x] implemented: login with password + TOTP
+  - [x] implemented: session token expiry + logout/session invalidation (`POST /api/v1/logout` revokes current token, `POST /api/v1/logout-all` invalidates older sessions via user cutoff timestamp)
+- [ ] **2. Identity key management (R4–R6)** — TODO
+  - [ ] TODO: per-device identity keypair stored locally (encrypted) (keypair exists, but local private key is not encrypted at rest)
+  - [x] implemented: server stores device public keys
+  - [ ] TODO: fingerprint display + verified flag (DB field exists, no CLI/flow implemented)
+  - [ ] TODO: key change detection (warn + re-verify policy)
+- [ ] **3. E2EE messaging (R7–R9)** — TODO
+  - [ ] TODO: session establishment via X25519 + HKDF (X25519 identity key exists; no HKDF session derivation flow)
+  - [ ] TODO: AEAD per message + AAD-bound metadata
+  - [ ] TODO: replay/dedup via client_msg_id + counters
+- [x] **4. Contact management (R13–R16)** — implemented
+  - [x] implemented: request/accept/decline; block/unblock
+  - [x] implemented: default anti-spam: non-friends cannot message
+- [x] **5. Offline messages (R20–R22)** — implemented
+  - [x] implemented: ciphertext queue store-and-forward
+  - [x] implemented: ACK/cleanup policy (ack delete + periodic expiry cleanup)
+- [ ] **6. Timed self-destruct (R10–R12)** — TODO
+  - [ ] TODO: TTL authenticated + client deletion + server best-effort deletion (server-side expiry cleanup exists; no AAD binding/client-side expiry deletion)
+- [ ] **7. Conversation list/unread/paging (R23–R25)** — TODO
+  - [ ] TODO: conversation list ordering + unread counters
+  - [ ] TODO: incremental history loading
+- [ ] **8. Delivery receipts semantics (R17–R19)** — TODO
+  - [ ] TODO: E2EE receipt messages define Delivered
 
 ---
 
@@ -215,7 +233,75 @@ Notes on sensitive server-side secrets:
 This section describes **intended** storage (server stores ciphertext; client stores local state). Final schema may evolve; security constraints above are normative.
 
 ### Server-side storage (conceptual)
-Table `User`:\n- `uuid` (PK)\n- `email` (unique)\n- `user_name`\n- `password_hash`\n- `otp_secret` (or equivalent; protect appropriately)\n\nTable `Device`:\n- `device_id` (PK)\n- `user_uuid` (FK)\n- `device_hash`\n- `device_public_key`\n\nTable `Friendship`:\n- `relation_id` (PK)\n- `user_id_a` (FK)\n- `user_id_b` (FK)\n- `status` (pending/accepted/blocked/etc.)\n\nTable `FriendRequest`:\n- `request_id` (PK)\n- `sender_uuid` (FK)\n- `receiver_uuid` (FK)\n- `status`\n- `expires_at`\n\nTable `OfflineMessage`:\n- `message_id` (PK)\n- `sender_uuid` (FK)\n- `receiver_uuid` (FK)\n- `ciphertext_envelope`\n- `expires_at`\n\n### Client-side storage (conceptual)\nTable `LocalIdentity`:\n- `user_uuid` (PK)\n- `public_key`\n- `private_key_encrypted`\n\nTable `Conversation`:\n- `contact_uuid` (PK)\n- `contact_name`\n- `unread_count`\n- `last_activity`\n\nTable `ContactDevice`:\n- `contact_device_id` (PK)\n- `contact_uuid` (FK)\n- `public_key`\n- `fingerprint`\n- `is_verified`\n- `last_seen_key_hash`\n\nTable `Message`:\n- `client_msg_id` (PK)\n- `conversation_id` (FK)\n- `direction` (INBOUND/OUTBOUND)\n- `status` (SENT/DELIVERED)\n- `message_type` (CHAT/RECEIPT)\n- `created_at`\n- `expires_at`\n- `plaintext_local` (optional; if stored, must be protected at rest)\n\nTable `SeenMessage` (dedup):\n- `client_msg_id`\n- `conversation_id`\n- `received_at`\n\n---
+Table `User`:
+- `uuid` (PK)
+- `email` (unique)
+- `user_name`
+- `password_hash`
+- `otp_secret` (or equivalent; protect appropriately)
+
+Table `Device`:
+- `device_id` (PK)
+- `user_uuid` (FK)
+- `device_hash`
+- `device_public_key`
+
+Table `Friendship`:
+- `relation_id` (PK)
+- `user_id_a` (FK)
+- `user_id_b` (FK)
+- `status` (pending/accepted/blocked/etc.)
+
+Table `FriendRequest`:
+- `request_id` (PK)
+- `sender_uuid` (FK)
+- `receiver_uuid` (FK)
+- `status`
+- `expires_at`
+
+Table `OfflineMessage`:
+- `message_id` (PK)
+- `sender_uuid` (FK)
+- `receiver_uuid` (FK)
+- `ciphertext_envelope`
+- `expires_at`
+
+### Client-side storage (conceptual)
+Table `LocalIdentity`:
+- `user_uuid` (PK)
+- `public_key`
+- `private_key_encrypted`
+
+Table `Conversation`:
+- `contact_uuid` (PK)
+- `contact_name`
+- `unread_count`
+- `last_activity`
+
+Table `ContactDevice`:
+- `contact_device_id` (PK)
+- `contact_uuid` (FK)
+- `public_key`
+- `fingerprint`
+- `is_verified`
+- `last_seen_key_hash`
+
+Table `Message`:
+- `client_msg_id` (PK)
+- `conversation_id` (FK)
+- `direction` (INBOUND/OUTBOUND)
+- `status` (SENT/DELIVERED)
+- `message_type` (CHAT/RECEIPT)
+- `created_at`
+- `expires_at`
+- `plaintext_local` (optional; if stored, must be protected at rest)
+
+Table `SeenMessage` (dedup):
+- `client_msg_id`
+- `conversation_id`
+- `received_at`
+
+---
 
 ## Deployment & usage (Ubuntu / Windows 11)
 ### Prerequisites
@@ -228,13 +314,22 @@ Create a venv and install dependencies:
 
 ### Run (client demo flow)
 The client uses environment variables to choose where to store local state and the local DB:
-- `CLIENT_STATE_PATH` (e.g., `/tmp/client-a-state.json`)\n- `CLIENT_DB_PATH` (e.g., `/tmp/client-a.db`)
+- `CLIENT_STATE_PATH` (e.g., `/tmp/client-a-state.json`)
+- `CLIENT_DB_PATH` (e.g., `/tmp/client-a.db`)
 
-Typical demo steps (two terminals, two users) are documented in:\n- `Client/ReadMe/what_to_test.md`
+Typical demo steps (two terminals, two users) are documented in:
+- `Client/ReadMe/what_to_test.md`
 
 ---
 
 ## Requirements mapping (R1–R25)
 This section maps the spec requirements to the README’s design sections (and acts as a checklist for implementation completion).
 
-- **R1–R3 Accounts & authentication**: “Cryptography choices”, “Engineering requirements”, “Roadmap / module checklist”.\n- **R4–R6 Identity & key management**: “Identity & key management”.\n- **R7–R9 E2EE messaging**: “Secure session establishment”, “E2EE message format…”.\n- **R10–R12 Self-destruct**: “Timed self-destruct messages”.\n- **R13–R16 Friends/contacts**: “Friends / contacts”.\n- **R17–R19 Delivery status**: “Message delivery status”.\n- **R20–R22 Offline messaging**: “Offline messaging”.\n- **R23–R25 Conversations/unread/paging**: “Conversation list, unread counters, paging”.\n*** End of File
+- **R1–R3 Accounts & authentication**: “Cryptography choices”, “Engineering requirements”, “Roadmap / module checklist”.
+- **R4–R6 Identity & key management**: “Identity & key management”.
+- **R7–R9 E2EE messaging**: “Secure session establishment”, “E2EE message format…”.
+- **R10–R12 Self-destruct**: “Timed self-destruct messages”.
+- **R13–R16 Friends/contacts**: “Friends / contacts”.
+- **R17–R19 Delivery status**: “Message delivery status”.
+- **R20–R22 Offline messaging**: “Offline messaging”.
+- **R23–R25 Conversations/unread/paging**: “Conversation list, unread counters, paging”.

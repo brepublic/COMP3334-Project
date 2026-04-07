@@ -18,6 +18,7 @@ class User(Base):
     user_name = Column(String, nullable=False)
     password_hash = Column(String, nullable=False)
     otp_secret = Column(String, nullable=False)
+    token_invalid_before = Column(DateTime, nullable=True)
 
     # Set foreign Keys
     devices = relationship("Device", back_populates="user", cascade="all, delete-orphan")
@@ -82,3 +83,15 @@ class OfflineMessage(Base):
 
     sender = relationship("User", foreign_keys=[sender_uuid], back_populates="sent_offline_messages")
     receiver = relationship("User", foreign_keys=[receiver_uuid], back_populates="received_offline_messages")
+
+
+#------------------------------------Revoked Token---------------------------------
+class RevokedToken(Base):
+    __tablename__ = "revoked_tokens"
+
+    revoke_id = Column(String, primary_key=True, default=generate_uuid)
+    user_uuid = Column(String, ForeignKey("users.uuid"), nullable=False)
+    token_jti = Column(String, unique=True, nullable=False)
+    token_hash = Column(String, unique=True, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    revoked_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)

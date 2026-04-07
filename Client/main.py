@@ -131,6 +131,38 @@ def login(
     typer.echo(f"WebSocket URL: {runtime.settings.websocket_url}")
 
 
+@app.command()
+def logout():
+    """Logout current session and revoke current token on server."""
+    runtime = build_runtime()
+    require_login(runtime)
+    api = build_api(runtime)
+    try:
+        response = run_api_call(api.logout)
+    finally:
+        api.close()
+
+    runtime.state.clear_auth()
+    runtime.state.save(runtime.settings.state_path)
+    typer.echo(response.message)
+
+
+@app.command("logout-all")
+def logout_all():
+    """Invalidate all existing sessions for current account."""
+    runtime = build_runtime()
+    require_login(runtime)
+    api = build_api(runtime)
+    try:
+        response = run_api_call(api.logout_all)
+    finally:
+        api.close()
+
+    runtime.state.clear_auth()
+    runtime.state.save(runtime.settings.state_path)
+    typer.echo(response.message)
+
+
 @app.command("friends")
 def friends_list():
     """List current friends from the server."""

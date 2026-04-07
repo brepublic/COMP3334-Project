@@ -95,6 +95,14 @@ class ChatClientAPI:
         data = self._request("POST", "/login", json_data=payload.model_dump())
         return LoginResponse.model_validate(data)
 
+    def logout(self) -> StandardResponse:
+        data = self._request("POST", "/logout", require_auth=True)
+        return StandardResponse.model_validate(data)
+
+    def logout_all(self) -> StandardResponse:
+        data = self._request("POST", "/logout-all", require_auth=True)
+        return StandardResponse.model_validate(data)
+
     def list_friends(self) -> FriendListResponse:
         data = self._request("GET", "/friends", require_auth=True)
         return FriendListResponse.model_validate(data)

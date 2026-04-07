@@ -1,7 +1,7 @@
 # routers/ChatWS.py
 
 import jwt
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Query
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Query, HTTPException
 from jwt.exceptions import InvalidTokenError
 from datetime import datetime, timezone
 
@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from config import settings
 from ws_manager import manager
 from Server_db import OfflineMessage, Friendship
-from Dependency import get_db
+from Dependency import get_db, authenticate_token
 
 router = APIRouter(tags=["WebSocket"])
 
@@ -39,6 +39,11 @@ async def websocket_endpoint(
     # 1. 验证失败直接踢掉断开
     if not user_uuid:
         await websocket.close(code=1008) # 1008: Policy Violation (未授权)
+        return
+    try:
+        authenticate_token(websocket.query_params.get("token", ""), db)
+    except HTTPException:
+        await websocket.close(code=1008)
         return
 
     # 2. 验证成功，登记上线

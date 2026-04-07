@@ -1,5 +1,6 @@
 import os
 from sqlalchemy import create_engine
+from sqlalchemy import inspect, text
 from sqlalchemy.orm import sessionmaker
 from contextlib import contextmanager
 
@@ -27,7 +28,16 @@ class ServerDBManager:
 
         # SQL Alchemy will decide if it needs to create a database.
         Base.metadata.create_all(bind=self.engine)
+        self._apply_runtime_migrations()
         print("Database initialization/verification complete.")
+
+    def _apply_runtime_migrations(self):
+        """Apply minimal runtime migrations for SQLite development DB."""
+        inspector = inspect(self.engine)
+        user_columns = {col["name"] for col in inspector.get_columns("users")}
+        if "token_invalid_before" not in user_columns:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE users ADD COLUMN token_invalid_before DATETIME"))
 
     def _get_session(self):
         """
