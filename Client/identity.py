@@ -4,6 +4,7 @@ import json
 import os
 from dataclasses import dataclass
 
+from sqlalchemy import text
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -144,6 +145,8 @@ def ensure_local_identity(db_manager: ClientDBManager, login_password: str) -> I
             if not identity.private_key:
                 raise RuntimeError("Local identity exists but private key is missing.")
 
+            schema_rows = db.execute(text("PRAGMA table_info(local_identity)")).fetchall()
+            private_key_schema = next((row for row in schema_rows if row[1] == "private_key"), None)
             salt = os.urandom(16)
             kek, params = derive_kek_from_login_password(login_password, salt)
             encrypted_private_key, nonce = encrypt_private_key(identity.private_key, kek)
@@ -153,7 +156,8 @@ def ensure_local_identity(db_manager: ClientDBManager, login_password: str) -> I
             identity.private_key_kdf = "scrypt"
             identity.private_key_kdf_params = json.dumps(params)
             plaintext_private_key = identity.private_key
-            identity.private_key = None
+            if not (private_key_schema and private_key_schema[3] == 1):
+                identity.private_key = None
             return IdentityMaterial(
                 uuid=identity.uuid,
                 public_key=identity.public_key,

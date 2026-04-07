@@ -209,10 +209,11 @@ Notes on sensitive server-side secrets:
   - [x] implemented: server stores device public keys
   - [x] implemented: fingerprint display + verified flag (`sync-contact-keys`, `show-fingerprints`, `verify-device`)
   - [x] implemented: key change detection (warn + re-verify policy, with persistent unverified state until user verifies)
-- [ ] **3. E2EE messaging (R7–R9)** — TODO
-  - [ ] TODO: session establishment via X25519 + HKDF (X25519 identity key exists; no HKDF session derivation flow)
-  - [ ] TODO: AEAD per message + AAD-bound metadata
-  - [ ] TODO: replay/dedup via client_msg_id + counters
+- [x] **3. E2EE messaging (R7–R9)** — implemented
+  - [x] implemented: session establishment via X25519 + HKDF-SHA256 (`derive_session_key` with protocol/device/user context binding)
+  - [x] implemented: per-message AEAD (AES-256-GCM) with canonical JSON AAD over routing/message metadata
+  - [x] implemented: replay/dedup via `client_msg_id` seen-set + per-sender-device inbound counter checks
+  - [x] note: current counter policy is strict monotonic (`incoming_counter > latest_seen`) and does not yet implement an out-of-order acceptance window
 - [x] **4. Contact management (R13–R16)** — implemented
   - [x] implemented: request/accept/decline; block/unblock
   - [x] implemented: default anti-spam: non-friends cannot message
