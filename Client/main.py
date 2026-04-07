@@ -84,6 +84,15 @@ ENVELOPE_TYPE_RECEIPT = "RECEIPT"
 DEBUG_LOG_PATH = os.getenv("CLIENT_DEBUG_LOG_PATH")
 DEBUG_SESSION_ID = os.getenv("CLIENT_DEBUG_SESSION_ID", "default")
 
+AUTO_PULL_INTERVAL_SECONDS = 2
+AUTO_PULL_BACKOFF_MAX_SECONDS = 30
+
+_SESSION_PASSWORD: str | None = None
+_AUTO_RECEIVER_THREAD: threading.Thread | None = None
+_AUTO_RECEIVER_STARTED_FOR_USER: str | None = None
+_AUTO_RECEIVER_STOP = threading.Event()
+_AUTO_RECEIVER_LOCK = threading.Lock()
+
 
 
 def _debug_log(run_id: str, hypothesis_id: str, location: str, message: str, data: dict) -> None:
