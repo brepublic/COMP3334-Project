@@ -45,7 +45,7 @@
   - accept succeeds
   - both friend lists show the relationship
 
-  5. Message send/pull
+  5. E2EE message send/pull
      From Alice:
 
   python3 -m Client.main chat <bob_uuid> "hello from alice" --ttl 300
@@ -57,8 +57,9 @@
   Expected:
 
   - Alice gets server message ID and status
-  - Bob sees the message printed from offline pull
-  - pull ACKs by default, so running pull again should show no offline messages
+  - server stores an opaque encrypted JSON envelope (not plaintext chat content)
+  - Bob sees decrypted message text printed from offline pull
+  - pull ACKs accepted messages by default, so running pull again should show no offline messages
 
   6. Identity key encryption at rest
 
@@ -139,11 +140,22 @@
   - local DB file is created
   - local state file is created
 
-  Known limitations of current Phase 1
-  These are expected and not failures yet:
+  9. Replay / tamper checks
 
-  - chat sends plaintext placeholder into the server ciphertext field
-  - there is no E2EE yet
-  - there is no websocket listen command yet
-  - there is no conversation list/unread logic yet
-  - identity key decryption currently depends on the login password provided during CLI login (single-password UX; no second passphrase)
+  Replay check:
+
+  - run `pull --no-ack` once to decrypt one offline message
+  - run `pull` again before acking or after re-inserting duplicated envelope in DB
+  - expected: duplicate `client_msg_id` or stale counter is rejected and not shown as a new chat message
+
+  Tamper check:
+
+  - modify one envelope metadata field (`receiver_uuid`, `counter`, or `ttl`) in server/offline storage
+  - run `pull`
+  - expected: decrypt/validation fails, message is rejected
+
+  Known limitations (current scope):
+
+  - no websocket listen command yet
+  - no conversation list/unread logic yet
+  - identity key decryption depends on the login password provided to each command

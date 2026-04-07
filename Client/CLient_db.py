@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import create_engine, Column, String, Integer, ForeignKey, Boolean, DateTime
+from sqlalchemy import Column, String, Integer, ForeignKey, Boolean, DateTime
 from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
@@ -62,3 +62,22 @@ class Message(Base):
     receive_at = Column(DateTime, default=lambda: datetime.now(timezone.utc)) 
 
     conversation = relationship("Conversation", back_populates="messages")
+
+
+class SeenMessage(Base):
+    __tablename__ = "seen_messages"
+
+    client_msg_id = Column(String, primary_key=True)
+    conversation_id = Column(String, ForeignKey("conversations.contact_uuid"), nullable=False)
+    sender_device_id = Column(String, nullable=False)
+    received_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class MessageCounter(Base):
+    __tablename__ = "message_counters"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    conversation_id = Column(String, ForeignKey("conversations.contact_uuid"), nullable=False)
+    peer_device_id = Column(String, nullable=False)
+    direction = Column(String, nullable=False)  # OUTBOUND / INBOUND
+    counter_value = Column(Integer, nullable=False, default=0)

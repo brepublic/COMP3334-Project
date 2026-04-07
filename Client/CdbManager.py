@@ -53,6 +53,65 @@ class ClientDBManager:
 
         self._add_column_if_missing("contact_devices", "fingerprint", "TEXT")
         self._add_column_if_missing("contact_devices", "last_seen_key_hash", "TEXT")
+        self._ensure_table_seen_messages()
+        self._ensure_table_message_counters()
+        self._ensure_counter_index()
+
+    def _table_exists(self, table_name: str) -> bool:
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = :name"
+                ),
+                {"name": table_name},
+            ).first()
+            return row is not None
+
+    def _ensure_table_seen_messages(self) -> None:
+        if self._table_exists("seen_messages"):
+            return
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE seen_messages (
+                        client_msg_id TEXT PRIMARY KEY,
+                        conversation_id TEXT NOT NULL,
+                        sender_device_id TEXT NOT NULL,
+                        received_at TEXT
+                    )
+                    """
+                )
+            )
+
+    def _ensure_table_message_counters(self) -> None:
+        if self._table_exists("message_counters"):
+            return
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE message_counters (
+                        id TEXT PRIMARY KEY,
+                        conversation_id TEXT NOT NULL,
+                        peer_device_id TEXT NOT NULL,
+                        direction TEXT NOT NULL,
+                        counter_value INTEGER NOT NULL DEFAULT 0
+                    )
+                    """
+                )
+            )
+
+    def _ensure_counter_index(self) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS ux_message_counters_scope
+                    ON message_counters(conversation_id, peer_device_id, direction)
+                    """
+                )
+            )
 
     def _get_session(self):
         """

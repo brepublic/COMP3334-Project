@@ -4,9 +4,10 @@ import json
 import os
 from dataclasses import dataclass
 
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 
 if __package__:
     from .CdbManager import ClientDBManager
@@ -42,6 +43,45 @@ def _encode_private_key(private_key) -> str:
 
 def _decode_public_key(public_key_b64: str) -> bytes:
     return base64.b64decode(public_key_b64.encode("ascii"))
+
+
+def _decode_private_key(private_key_b64: str) -> bytes:
+    return base64.b64decode(private_key_b64.encode("ascii"))
+
+
+def load_private_key(private_key_b64: str) -> X25519PrivateKey:
+    return X25519PrivateKey.from_private_bytes(_decode_private_key(private_key_b64))
+
+
+def load_public_key(public_key_b64: str) -> X25519PublicKey:
+    return X25519PublicKey.from_public_bytes(_decode_public_key(public_key_b64))
+
+
+def derive_session_key(
+    local_private_key_b64: str,
+    peer_public_key_b64: str,
+    sender_uuid: str,
+    receiver_uuid: str,
+    sender_device_id: str,
+    receiver_device_id: str,
+    protocol_version: int = 1,
+) -> bytes:
+    local_private_key = load_private_key(local_private_key_b64)
+    peer_public_key = load_public_key(peer_public_key_b64)
+    shared_secret = local_private_key.exchange(peer_public_key)
+
+    info = (
+        f"comp3334-e2ee-v{protocol_version}|"
+        f"sender={sender_uuid}|receiver={receiver_uuid}|"
+        f"sender_device={sender_device_id}|receiver_device={receiver_device_id}"
+    ).encode("utf-8")
+    hkdf = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=None,
+        info=info,
+    )
+    return hkdf.derive(shared_secret)
 
 
 def derive_kek_from_login_password(password: str, salt: bytes, kdf_params: dict | None = None) -> tuple[bytes, dict]:
