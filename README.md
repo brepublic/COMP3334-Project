@@ -310,7 +310,7 @@ Table `SeenMessage` (dedup):
 ## Deployment & usage
 
 Use the full step-by-step setup and demo guide here:
-- [DEPLOYMENT_AND_USAGE.md](/Users/tj/Downloads/project/COMP3334/DEPLOYMENT_AND_USAGE.md)
+- [deploy_and_use_guide.md](/Users/tj/Downloads/project/COMP3334/deploy_and_use_guide.md)
 
 That document covers:
 - virtual environment setup

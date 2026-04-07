@@ -63,6 +63,36 @@ mkdir -p certs
 mkcert -cert-file certs/dev.crt -key-file certs/dev.key localhost 127.0.0.1 ::1
 ```
 
+Important:
+- do not commit `certs/dev.key`
+- do not upload your local certificates to GitHub
+- each teammate should generate their own local certs on their own machine
+
+## 4.1 Make Python Trust The `mkcert` CA
+
+Some Python environments do not automatically trust the local CA installed by `mkcert`, even if your browser does.
+
+If you see an error like:
+
+```text
+[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate
+```
+
+run:
+
+```bash
+mkcert -install
+export SSL_CERT_FILE="$(mkcert -CAROOT)/rootCA.pem"
+```
+
+Then run the client command again in the same shell.
+
+On Windows PowerShell:
+
+```powershell
+mkcert -install
+$env:SSL_CERT_FILE = "$(mkcert -CAROOT)\rootCA.pem"
+```
 
 ## 5. Configure Server Environment
 
@@ -412,8 +442,22 @@ Fix:
 
 ```bash
 mkdir -p certs
-mkcert -cert-file certs/dev.crt -key-file certs/dev.key 127.0.0.1 localhost
+mkcert -cert-file certs/dev.crt -key-file certs/dev.key localhost 127.0.0.1 ::1
 ```
+
+### Certificate verify failed: unable to get local issuer certificate
+
+Cause:
+- Python does not trust the local `mkcert` root CA in your current shell
+
+Fix:
+
+```bash
+mkcert -install
+export SSL_CERT_FILE="$(mkcert -CAROOT)/rootCA.pem"
+```
+
+Then retry the client command.
 
 ### Client rejects `http` or `ws`
 
