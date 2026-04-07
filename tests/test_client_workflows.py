@@ -88,6 +88,24 @@ def test_client_pending_decline_cancel_and_block_commands(client_harness):
     assert "ignored" in ignored_request.output.lower()
 
 
+def test_client_non_message_command_works_without_in_memory_session_password(client_harness):
+    # Verifies non-message commands still work in a fresh CLI process where no session password is cached in memory.
+    # Expected result: add-friend succeeds using saved auth state only and does not crash with NameError.
+    alice_env = client_harness.profile_env("alice")
+    bob_env = client_harness.profile_env("bob")
+
+    alice_secret = client_harness.register(alice_env, "alice@example.com", "alice")
+    bob_secret = client_harness.register(bob_env, "bob@example.com", "bob")
+    _, _ = client_harness.login(alice_env, "alice@example.com", alice_secret)
+    _, _ = client_harness.login(bob_env, "bob@example.com", bob_secret)
+
+    client_harness.client_main._SESSION_PASSWORD = None
+
+    add_result = client_harness.run(alice_env, ["add-friend", "bob@example.com"])
+    assert add_result.exit_code == 0, add_result.output
+    assert "Successfully" in add_result.output
+
+
 def test_client_send_pull_receipt_and_history(client_harness):
     # Verifies the core encrypted messaging flow including receipt-based delivery status.
     # Expected result: Bob decrypts the message, Alice later receives a delivered receipt, and history reflects DELIVERED.

@@ -63,11 +63,6 @@ mkdir -p certs
 mkcert -cert-file certs/dev.crt -key-file certs/dev.key localhost 127.0.0.1 ::1
 ```
 
-Important:
-- do not commit `certs/dev.key`
-- do not upload your local certificates to GitHub
-- each teammate should generate their own local certs on their own machine
-
 ## 4.1 Make Python Trust The `mkcert` CA
 
 Some Python environments do not automatically trust the local CA installed by `mkcert`, even if your browser does.
