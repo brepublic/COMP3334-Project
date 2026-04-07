@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 
+import pyotp
 import typer
+from qrcode import QRCode
 
 if __package__:
     from .api import ChatClientAPI, ClientAPIError
@@ -71,13 +73,28 @@ def run_api_call(callback):
         raise typer.Exit(code=1)
 
 
+def render_otp_qr_code(email: str, otp_secret: str) -> None:
+    """Render a TOTP provisioning QR code in terminal-friendly ASCII."""
+    provisioning_uri = pyotp.TOTP(otp_secret).provisioning_uri(
+        name=email,
+        issuer_name="COMP3334 Secure IM",
+    )
+    qr = QRCode(border=1)
+    qr.add_data(provisioning_uri)
+    qr.make(fit=True)
+
+    typer.echo("Scan this QR code with your authenticator app:")
+    qr.print_ascii(invert=True)
+    typer.echo(f"Provisioning URI: {provisioning_uri}")
+
+
 @app.command()
 def register(
     email: str = typer.Option(..., prompt=True),
     user_name: str = typer.Option(..., prompt=True),
     password: str = typer.Option(..., prompt=True, hide_input=True),
 ):
-    """Register a new user and print the OTP secret returned by the server."""
+    """Register a new user and print OTP setup info."""
     runtime = build_runtime()
     api = build_api(runtime)
     try:
@@ -91,6 +108,7 @@ def register(
 
     typer.echo(f"Registered user UUID: {response.user_uuid}")
     typer.echo(f"OTP secret: {response.otp_secret}")
+    render_otp_qr_code(email=email, otp_secret=response.otp_secret)
     typer.echo("Store the OTP secret in your authenticator app before logging in.")
 
 

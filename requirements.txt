@@ -12,3 +12,4 @@ httpx
 websockets
 cryptography
 typer
+qrcode
