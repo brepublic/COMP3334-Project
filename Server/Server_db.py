@@ -77,6 +77,19 @@ class FriendRequestRateLimit(Base):
     blocked_until = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
+
+class UserBlock(Base):
+    __tablename__ = "user_blocks"
+
+    block_id = Column(String, primary_key=True, default=generate_uuid)
+    blocker_uuid = Column(String, ForeignKey("users.uuid"), nullable=False)
+    blocked_uuid = Column(String, ForeignKey("users.uuid"), nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("blocker_uuid", "blocked_uuid", name="_blocker_blocked_uc"),
+    )
+
 #——-----------------------------------------Offline Message-----------------------------
 class OfflineMessage(Base):
     __tablename__ = 'offline_messages'

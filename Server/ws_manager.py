@@ -1,6 +1,10 @@
 # ws_manager.py
+import logging
 from fastapi import WebSocket
 from typing import Dict
+
+
+logger = logging.getLogger(__name__)
 
 class ConnectionManager:
     def __init__(self):
@@ -11,13 +15,13 @@ class ConnectionManager:
         """用户上线：接受连接并登记造册"""
         await websocket.accept()
         self.active_connections[user_uuid] = websocket
-        print(f"[WS] 用户 {user_uuid} 已上线，当前在线人数: {len(self.active_connections)}")
+        logger.info("WebSocket user connected: %s", user_uuid)
 
     def disconnect(self, user_uuid: str):
         """用户下线：从字典中移除"""
         if user_uuid in self.active_connections:
             del self.active_connections[user_uuid]
-            print(f"[WS] 用户 {user_uuid} 已下线")
+            logger.info("WebSocket user disconnected: %s", user_uuid)
 
     async def send_personal_message(self, message: dict, target_uuid: str) -> bool:
         """精准投递：尝试向特定用户发送消息"""
@@ -27,7 +31,7 @@ class ConnectionManager:
                 await target_ws.send_json(message)
                 return True # 发送成功
             except Exception as e:
-                print(f"[WS] 发送给 {target_uuid} 失败: {e}，将其从在线列表移除")
+                logger.warning("WebSocket send to %s failed: %s", target_uuid, e)
                 self.disconnect(target_uuid)
                 return False # 目标可能已断开
         return False # 目标不在线

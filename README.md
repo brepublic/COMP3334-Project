@@ -307,49 +307,22 @@ Table `SeenMessage` (dedup):
 
 ---
 
-## Deployment & usage (Ubuntu / Windows 11)
-### Prerequisites
-- Python 3.10+ recommended
-- `pip` + virtual environment
+## Deployment & usage
 
-### Install
-Create a venv and install dependencies:
-- `pip install -r requirements.txt`
+Use the full step-by-step setup and demo guide here:
+- [DEPLOYMENT_AND_USAGE.md](/Users/tj/Downloads/project/COMP3334/DEPLOYMENT_AND_USAGE.md)
 
-### Run (client demo flow)
-The client uses environment variables to choose where to store local state and the local DB:
-- `CLIENT_STATE_PATH` (e.g., `/tmp/client-a-state.json`)
-- `CLIENT_DB_PATH` (e.g., `/tmp/client-a.db`)
+That document covers:
+- virtual environment setup
+- dependency installation
+- local TLS certificate generation with `mkcert`
+- `.env` configuration
+- server startup
+- client profile setup
+- registration, login, OTP, contacts, fingerprints, chat, pull, history, and demo flow
 
-Run a single command (existing behavior):
-- `python -m Client.main --help`
-- `python -m Client.main login --help`
-
-Run interactive CLI mode (new behavior):
-- Start REPL: `python -m Client.main interactive`
-- In REPL, execute normal command names directly, for example:
-  - `friends`
-  - `pending`
-  - `help chat`
-- Prompt format:
-  - logged-out: `guest@client>`
-  - logged-in: `<username>@client>`
-- `chat` command (interactive session):
-  - `chat <username>`: open chat directly; if duplicate usernames exist, the client shows numbered candidates (`username + email + uuid`) to choose from
-  - `chat` (without args): opens friend list (`No + Username + LastMessage`) for selection
-  - in chat session:
-    - plain text sends a message with default TTL
-    - `/ttl <seconds> <message>` sends a self-destruct message with custom TTL
-    - `/refresh` reloads recent local chat view
-    - `/back` exits chat session
-- `remove-friend <username>`:
-  - remove a friend by username
-  - duplicate usernames are disambiguated via numbered selection (`username + email + uuid`)
-- Exit REPL with `exit`, `quit`, or `Ctrl+D`.
-- Pressing `Ctrl+C` inside REPL cancels current input and keeps the session running.
-
-Typical demo steps (two terminals, two users) are documented in:
-- `Client/ReadMe/what_to_test.md`
+Additional quick demo notes remain in:
+- [what_to_test.md](/Users/tj/Downloads/project/COMP3334/Client/ReadMe/what_to_test.md)
 
 ---
 

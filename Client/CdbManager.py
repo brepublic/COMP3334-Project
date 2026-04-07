@@ -1,4 +1,5 @@
 from pathlib import Path
+import logging
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from contextlib import contextmanager
@@ -8,6 +9,9 @@ if __package__:
     from .CLient_db import Base
 else:
     from CLient_db import Base
+
+
+logger = logging.getLogger(__name__)
 
 class ClientDBManager:
     """
@@ -36,7 +40,7 @@ class ClientDBManager:
         # SQL Alchemy will decide if it needs to create a database.
         Base.metadata.create_all(bind=self.engine)
         self._run_schema_migrations()
-        print("Database initialization/verification complete.")
+        logger.debug("Database initialization/verification complete.")
 
     def _column_exists(self, table_name: str, column_name: str) -> bool:
         with self.engine.connect() as conn:
@@ -66,6 +70,7 @@ class ClientDBManager:
         self._add_column_if_missing("messages", "expires_at", "TEXT")
         self._ensure_table_seen_messages()
         self._ensure_table_message_counters()
+        self._add_column_if_missing("message_counters", "recent_counters", "TEXT")
         self._ensure_counter_index()
         self._ensure_message_indexes()
 
@@ -108,7 +113,8 @@ class ClientDBManager:
                         conversation_id TEXT NOT NULL,
                         peer_device_id TEXT NOT NULL,
                         direction TEXT NOT NULL,
-                        counter_value INTEGER NOT NULL DEFAULT 0
+                        counter_value INTEGER NOT NULL DEFAULT 0,
+                        recent_counters TEXT
                     )
                     """
                 )

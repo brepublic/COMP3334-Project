@@ -1,8 +1,8 @@
 # routers/Contacts.py
 
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, Depends, HTTPException, status
-from typing import List
+from fastapi import APIRouter, Depends, HTTPException, Query
+from typing import List, Literal
 
 # Import schema and my own modules
 from Schema import (
@@ -10,10 +10,42 @@ from Schema import (
     FriendRequestAction, PendingRequestInfo, FriendInfo, 
     FriendListResponse, ContactKeysResponse, DeviceKeyInfo
 )
-from Server_db import User, Friendship, FriendRequest, Device, FriendRequestRateLimit
+from Server_db import User, Friendship, FriendRequest, Device, FriendRequestRateLimit, UserBlock
 from Dependency import get_db, get_current_user
 
 router = APIRouter(tags=["Contacts"])
+
+
+def _ensure_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _block_exists(db, blocker_uuid: str, blocked_uuid: str) -> bool:
+    return (
+        db.query(UserBlock)
+        .filter(
+            UserBlock.blocker_uuid == blocker_uuid,
+            UserBlock.blocked_uuid == blocked_uuid,
+        )
+        .first()
+        is not None
+    )
+
+
+def _pending_info_for(db, request_row: FriendRequest, direction: Literal["incoming", "outgoing"]) -> PendingRequestInfo:
+    if direction == "incoming":
+        counterparty_uuid = request_row.sender_uuid
+    else:
+        counterparty_uuid = request_row.receiver_uuid
+    counterparty = db.query(User).filter(User.uuid == counterparty_uuid).first()
+    return PendingRequestInfo(
+        request_id=request_row.request_id,
+        direction=direction,
+        counterparty_uuid=counterparty_uuid,
+        counterparty_name=counterparty.user_name if counterparty else "Unknown",
+    )
 
 @router.post("/friends/request", response_model=StandardResponse)
 def send_friend_request(
@@ -27,8 +59,9 @@ def send_friend_request(
     rate_limit = db.query(FriendRequestRateLimit).filter(
         FriendRequestRateLimit.sender_uuid == current_user_uuid
     ).first()
-    if rate_limit and rate_limit.blocked_until and rate_limit.blocked_until > now:
-        remaining_seconds = int((rate_limit.blocked_until - now).total_seconds())
+    blocked_until = _ensure_utc(rate_limit.blocked_until) if rate_limit else None
+    if blocked_until and blocked_until > now:
+        remaining_seconds = int((blocked_until - now).total_seconds())
         raise HTTPException(
             status_code=429,
             detail=f"Too many friend requests. Retry in about {remaining_seconds} seconds.",
@@ -44,6 +77,9 @@ def send_friend_request(
     target_user = db.query(User).filter(User.email == target_email).first()
     if not target_user:
         raise HTTPException(status_code=404, detail="Doesn't not found user.")
+
+    if _block_exists(db, target_user.uuid, current_user_uuid) or _block_exists(db, current_user_uuid, target_user.uuid):
+        return StandardResponse(message="Friend request ignored.")
 
     # Check for duplicate
     existing_friend = db.query(Friendship).filter(
@@ -93,29 +129,23 @@ def send_friend_request(
 # Accept Friend request
 @router.get("/friends/pending", response_model=List[PendingRequestInfo])
 def get_pending_requests(
+    direction: Literal["incoming", "outgoing"] = Query(default="incoming"),
     db = Depends(get_db),
     current_user_uuid: str = Depends(get_current_user)
 ):
     """Get Pending friend request"""
-    
-    # Get the friend list of request
-    requests = db.query(FriendRequest).filter(
-        FriendRequest.receiver_uuid == current_user_uuid,
-        FriendRequest.status == "PENDING"
-    ).all()
+    if direction == "incoming":
+        requests = db.query(FriendRequest).filter(
+            FriendRequest.receiver_uuid == current_user_uuid,
+            FriendRequest.status == "PENDING"
+        ).all()
+    else:
+        requests = db.query(FriendRequest).filter(
+            FriendRequest.sender_uuid == current_user_uuid,
+            FriendRequest.status == "PENDING"
+        ).all()
 
-    response_list = []
-    for req in requests:
-        # Grab user name of the friend list
-        sender = db.query(User).filter(User.uuid == req.sender_uuid).first()
-        response_list.append(
-            PendingRequestInfo(
-                request_id=req.request_id,
-                sender_uuid=req.sender_uuid,
-                sender_name=sender.user_name if sender else "Unkown"
-            )
-        )
-    return response_list
+    return [_pending_info_for(db, req, direction) for req in requests]
 
 
 # Respond to friend request
@@ -188,18 +218,34 @@ def block_user(
     current_user_uuid: str = Depends(get_current_user)
 ):
     
+    if request.target_uuid == current_user_uuid:
+        raise HTTPException(status_code=400, detail="Cannot block yourself.")
+
+    target_user = db.query(User).filter(User.uuid == request.target_uuid).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Target user not found.")
+
+    existing_block = db.query(UserBlock).filter(
+        UserBlock.blocker_uuid == current_user_uuid,
+        UserBlock.blocked_uuid == request.target_uuid,
+    ).first()
+    if not existing_block:
+        db.add(UserBlock(blocker_uuid=current_user_uuid, blocked_uuid=request.target_uuid))
+
     friendships = db.query(Friendship).filter(
         ((Friendship.user_uuid_1 == current_user_uuid) & (Friendship.user_uuid_2 == request.target_uuid)) |
         ((Friendship.user_uuid_1 == request.target_uuid) & (Friendship.user_uuid_2 == current_user_uuid))
     ).all()
 
-    if not friendships:
-        raise HTTPException(status_code=404, detail="You are not friend, cannot block")
-
     # Update Block information
     for f in friendships:
         f.status = "BLOCKED"
         f.blocked_by = current_user_uuid
+
+    db.query(FriendRequest).filter(
+        ((FriendRequest.sender_uuid == current_user_uuid) & (FriendRequest.receiver_uuid == request.target_uuid))
+        | ((FriendRequest.sender_uuid == request.target_uuid) & (FriendRequest.receiver_uuid == current_user_uuid))
+    ).delete(synchronize_session=False)
 
     return StandardResponse(message="Blocked User")
 

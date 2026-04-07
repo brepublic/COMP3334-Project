@@ -89,3 +89,4 @@ class MessageCounter(Base):
     peer_device_id = Column(String, nullable=False)
     direction = Column(String, nullable=False)  # OUTBOUND / INBOUND
     counter_value = Column(Integer, nullable=False, default=0)
+    recent_counters = Column(String, nullable=True)

@@ -33,7 +33,13 @@ def create_access_token(data: dict, expires_delta: timedelta):
     issued_at = datetime.now(timezone.utc)
     expire = issued_at + expires_delta
     # add expiration date to data
-    to_encode.update({"iat": issued_at, "exp": expire, "jti": str(uuid.uuid4())})
+    to_encode.update(
+        {
+            "iat": issued_at.timestamp(),
+            "exp": expire.timestamp(),
+            "jti": str(uuid.uuid4()),
+        }
+    )
     
     # Sign it with server secrete key
     encoded_jwt = jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
@@ -58,10 +64,12 @@ def login_user(request: Request, payload: LoginRequest, db=Depends(get_db)):
 
     # Validate OTP
     totp = pyotp.TOTP(user.otp_secret)
-    if not totp.verify(payload.otp_code):
+    if not totp.verify(payload.otp_code, valid_window=1):
         raise HTTPException(status_code=401, detail="Incorret OTP or time out")
 
     
+    # Single-device policy: older sessions become invalid at each successful login.
+    user.token_invalid_before = datetime.now(timezone.utc)
     # Delete the previous devices. Supports only single device login.
     db.query(Device).filter(Device.user_uuid == user.uuid).delete()
     # Create the entry for the new device.

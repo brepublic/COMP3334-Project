@@ -10,7 +10,7 @@ from Schema import (
     OfflineMessageResponse, OfflineMessageItem, 
     AckMessagesRequest, StandardResponse
 )
-from Server_db import User, OfflineMessage, Friendship
+from Server_db import User, OfflineMessage, Friendship, UserBlock
 from Dependency import get_db, get_current_user
 
 router = APIRouter(tags=["Messages"])
@@ -34,7 +34,18 @@ def send_message(
         Friendship.user_uuid_2 == current_user_uuid
     ).first()
 
-    if not relation or (relation.status == "BLOCKED" and relation.blocked_by == request.receiver_uuid):
+    blocked = db.query(UserBlock).filter(
+        (
+            (UserBlock.blocker_uuid == request.receiver_uuid)
+            & (UserBlock.blocked_uuid == current_user_uuid)
+        )
+        | (
+            (UserBlock.blocker_uuid == current_user_uuid)
+            & (UserBlock.blocked_uuid == request.receiver_uuid)
+        )
+    ).first()
+
+    if blocked or not relation or relation.status != "FRIEND":
         # If the sender is blocked by receiver, return a fake success message
         fake_message_id = str(uuid.uuid4())
         return SendMessageResponse(
@@ -67,7 +78,7 @@ def get_offline_messages(
     # get all offline message destinated to requester
     messages = db.query(OfflineMessage).filter(
         OfflineMessage.receiver_uuid == current_user_uuid
-    ).all()
+    ).order_by(OfflineMessage.created_at.asc(), OfflineMessage.message_id.asc()).all()
 
     # Return as specified in shcema
     msg_list = []

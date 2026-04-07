@@ -6,6 +6,7 @@ import shlex
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 import click
 import pyotp
@@ -65,11 +66,13 @@ class ContactKeySyncResult:
 PROTOCOL_VERSION = 1
 ENVELOPE_TYPE_CHAT = "CHAT"
 ENVELOPE_TYPE_RECEIPT = "RECEIPT"
-DEBUG_LOG_PATH = "/home/makoto/COMP3334/.cursor/debug-186468.log"
-DEBUG_SESSION_ID = "186468"
+DEBUG_LOG_PATH = os.getenv("CLIENT_DEBUG_LOG_PATH")
+DEBUG_SESSION_ID = os.getenv("CLIENT_DEBUG_SESSION_ID", "default")
 
 
 def _debug_log(run_id: str, hypothesis_id: str, location: str, message: str, data: dict) -> None:
+    if not DEBUG_LOG_PATH:
+        return
     # region agent log
     payload = {
         "sessionId": DEBUG_SESSION_ID,
@@ -147,10 +150,11 @@ def _run_interactive_shell() -> None:
 
 def build_runtime() -> ClientRuntime:
     settings = get_settings()
+    _validate_transport_settings(settings)
     db_manager = ClientDBManager(str(settings.db_path))
-    state = ClientState.load(settings.state_path)
+    state = ClientState.load(settings.state_path, settings.state_key_path)
     state.ensure_local_device_id(settings.local_device_id)
-    state.save(settings.state_path)
+    state.save(settings.state_path, settings.state_key_path)
     return ClientRuntime(settings=settings, state=state, db_manager=db_manager)
 
 
@@ -158,6 +162,30 @@ def build_api(runtime: ClientRuntime) -> ChatClientAPI:
     return ChatClientAPI(
         base_url=runtime.settings.server_base_url,
         access_token=runtime.state.access_token,
+    )
+
+
+def _validate_transport_settings(settings: object) -> None:
+    for attr_name, required_scheme in (
+        ("server_base_url", "https"),
+        ("websocket_url", "wss"),
+    ):
+        value = getattr(settings, attr_name)
+        parsed = urlparse(value)
+        if parsed.scheme != required_scheme:
+            raise typer.BadParameter(
+                f"{attr_name} must use {required_scheme}: {value}"
+            )
+
+
+def _warn_changed_devices(contact_uuid: str, changed_devices: list[str]) -> None:
+    if not changed_devices:
+        return
+    typer.secho(
+        "Warning: key changed for device(s): "
+        + ", ".join(changed_devices)
+        + f" on contact {contact_uuid}. Verification was reset; re-verify fingerprints.",
+        fg=typer.colors.YELLOW,
     )
 
 
@@ -230,6 +258,8 @@ def _sync_contact_keys(runtime: ClientRuntime, contact_uuid: str) -> ContactKeyS
             new_hash = key_fingerprint(device.device_public_key)
             current = by_device_id.get(device.device_id)
             if not current:
+                if existing_devices:
+                    changed_devices.append(device.device_id)
                 db.add(
                     ContactDevice(
                         contact_device_id=device.device_id,
@@ -312,7 +342,13 @@ def _next_counter(db_manager: ClientDBManager, conversation_id: str, peer_device
         return record.counter_value
 
 
-def _latest_inbound_counter(db_manager: ClientDBManager, conversation_id: str, peer_device_id: str) -> int:
+def _accept_inbound_counter(
+    db_manager: ClientDBManager,
+    conversation_id: str,
+    peer_device_id: str,
+    counter: int,
+    window_size: int = 32,
+) -> tuple[bool, str | None]:
     with db_manager.get_session() as db:
         record = db.execute(
             select(MessageCounter).where(
@@ -321,18 +357,9 @@ def _latest_inbound_counter(db_manager: ClientDBManager, conversation_id: str, p
                 MessageCounter.direction == "INBOUND",
             )
         ).scalar_one_or_none()
-        return record.counter_value if record else 0
+        if counter <= 0:
+            return False, "invalid-counter"
 
-
-def _update_inbound_counter(db_manager: ClientDBManager, conversation_id: str, peer_device_id: str, counter: int) -> None:
-    with db_manager.get_session() as db:
-        record = db.execute(
-            select(MessageCounter).where(
-                MessageCounter.conversation_id == conversation_id,
-                MessageCounter.peer_device_id == peer_device_id,
-                MessageCounter.direction == "INBOUND",
-            )
-        ).scalar_one_or_none()
         if not record:
             db.add(
                 MessageCounter(
@@ -340,10 +367,29 @@ def _update_inbound_counter(db_manager: ClientDBManager, conversation_id: str, p
                     peer_device_id=peer_device_id,
                     direction="INBOUND",
                     counter_value=counter,
+                    recent_counters=json.dumps([counter]),
                 )
             )
-            return
-        record.counter_value = max(record.counter_value, counter)
+            return True, None
+
+        max_seen = record.counter_value or 0
+        recent_counters = set()
+        if record.recent_counters:
+            recent_counters = {int(value) for value in json.loads(record.recent_counters)}
+
+        if counter in recent_counters:
+            return False, f"duplicate-counter={counter}"
+        if counter <= max_seen - window_size:
+            return False, f"outside-window={counter}\tlatest={max_seen}"
+        if counter > max_seen + window_size:
+            return False, f"future-counter={counter}\tlatest={max_seen}"
+
+        max_seen = max(max_seen, counter)
+        recent_counters.add(counter)
+        recent_counters = {value for value in recent_counters if value > max_seen - window_size}
+        record.counter_value = max_seen
+        record.recent_counters = json.dumps(sorted(recent_counters))
+        return True, None
 
 
 def _is_seen_message(db_manager: ClientDBManager, client_msg_id: str) -> bool:
@@ -366,6 +412,12 @@ def _mark_seen_message(db_manager: ClientDBManager, client_msg_id: str, conversa
 
 def _parse_utc_ts(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _ensure_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
 def _touch_conversation(
@@ -437,9 +489,9 @@ def _cleanup_expired_local_messages(db_manager: ClientDBManager) -> int:
         expired_ids: list[str] = []
         for row in rows:
             if row.expires_at:
-                expires_at = row.expires_at
+                expires_at = _ensure_utc(row.expires_at)
             else:
-                received = row.receive_at or now
+                received = _ensure_utc(row.receive_at) or now
                 expires_at = received + timedelta(seconds=max(0, int(row.expire_duration or 0)))
             if expires_at <= now:
                 expired_ids.append(row.message_id)
@@ -544,7 +596,7 @@ def login(
             "local_device_id": runtime.state.local_device_id,
         },
     )
-    runtime.state.save(runtime.settings.state_path)
+    runtime.state.save(runtime.settings.state_path, runtime.settings.state_key_path)
 
     typer.echo(f"Logged in as user UUID: {response.user_uuid}")
     typer.echo(f"Local device ID: {runtime.state.local_device_id}")
@@ -563,7 +615,7 @@ def logout():
         api.close()
 
     runtime.state.clear_auth()
-    runtime.state.save(runtime.settings.state_path)
+    runtime.state.save(runtime.settings.state_path, runtime.settings.state_key_path)
     typer.echo(response.message)
 
 
@@ -579,7 +631,7 @@ def logout_all():
         api.close()
 
     runtime.state.clear_auth()
-    runtime.state.save(runtime.settings.state_path)
+    runtime.state.save(runtime.settings.state_path, runtime.settings.state_key_path)
     typer.echo(response.message)
 
 
@@ -647,13 +699,13 @@ def remove_friend(username: str):
 
 
 @app.command()
-def pending():
-    """List pending incoming friend requests."""
+def pending(direction: str = typer.Option("incoming", "--direction", case_sensitive=False)):
+    """List pending friend requests."""
     runtime = build_runtime()
     require_login(runtime)
     api = build_api(runtime)
     try:
-        requests = run_api_call(api.pending_requests)
+        requests = run_api_call(lambda: api.pending_requests(direction.lower()))
     finally:
         api.close()
 
@@ -661,8 +713,8 @@ def pending():
         typer.echo("No pending requests.")
         return
 
-    rows = [[req.request_id, req.sender_name, req.sender_uuid] for req in requests]
-    _print_columns(["RequestID", "SenderName", "SenderUUID"], rows)
+    rows = [[req.request_id, req.direction, req.counterparty_name, req.counterparty_uuid] for req in requests]
+    _print_columns(["RequestID", "Direction", "Counterparty", "CounterpartyUUID"], rows)
 
 
 @app.command()
@@ -683,6 +735,49 @@ def accept(request_id: str):
     typer.echo(response.message)
 
 
+@app.command()
+def decline(request_id: str):
+    """Decline a pending friend request."""
+    runtime = build_runtime()
+    require_login(runtime)
+    api = build_api(runtime)
+    try:
+        response = run_api_call(
+            lambda: api.respond_to_request(
+                FriendRequestAction(request_id=request_id, action="REJECT")
+            )
+        )
+    finally:
+        api.close()
+    typer.echo(response.message)
+
+
+@app.command("cancel-request")
+def cancel_request(request_id: str):
+    """Cancel an outgoing pending friend request."""
+    runtime = build_runtime()
+    require_login(runtime)
+    api = build_api(runtime)
+    try:
+        response = run_api_call(lambda: api.cancel_friend_request(request_id))
+    finally:
+        api.close()
+    typer.echo(response.message)
+
+
+@app.command("block-user")
+def block_user(target_uuid: str):
+    """Block a user by UUID."""
+    runtime = build_runtime()
+    require_login(runtime)
+    api = build_api(runtime)
+    try:
+        response = run_api_call(lambda: api.block_user(target_uuid))
+    finally:
+        api.close()
+    typer.echo(response.message)
+
+
 def _select_friend_interactively(options: list, title: str) -> object | None:
     if not options:
         return None
@@ -698,6 +793,7 @@ def _select_friend_interactively(options: list, title: str) -> object | None:
 
 
 def _show_recent_chat(runtime: ClientRuntime, contact_uuid: str, limit: int = 12) -> None:
+    _cleanup_expired_local_messages(runtime.db_manager)
     with runtime.db_manager.get_session() as db:
         rows = db.execute(
             select(Message)
@@ -723,7 +819,8 @@ def _send_chat_payload(runtime: ClientRuntime, receiver_uuid: str, message: str,
         raise typer.BadParameter("No saved user UUID found. Run login first.")
     identity = ensure_local_identity(runtime.db_manager, password)
     _ensure_conversation_exists(runtime.db_manager, receiver_uuid)
-    _sync_contact_keys(runtime, receiver_uuid)
+    sync_result = _sync_contact_keys(runtime, receiver_uuid)
+    _warn_changed_devices(receiver_uuid, sync_result.changed_devices)
     with runtime.db_manager.get_session() as db:
         device = db.execute(
             select(ContactDevice).where(ContactDevice.contact_uuid == receiver_uuid)
@@ -834,6 +931,7 @@ def chat(
 
     if not selected:
         return
+    _cleanup_expired_local_messages(runtime.db_manager)
     _touch_conversation(runtime.db_manager, selected.uuid, contact_name=selected.user_name, clear_unread=True)
     password = typer.prompt("Password", hide_input=True)
     default_ttl = 86400
@@ -892,6 +990,7 @@ def pull(
                 envelope = json.loads(item.ciphertext)
             except json.JSONDecodeError:
                 typer.secho(f"{item.message_id}\tinvalid-envelope-json", fg=typer.colors.YELLOW)
+                message_ids.append(item.message_id)
                 continue
 
             required_fields = {
@@ -910,6 +1009,7 @@ def pull(
             }
             if not required_fields.issubset(envelope.keys()):
                 typer.secho(f"{item.message_id}\tmissing-envelope-fields", fg=typer.colors.YELLOW)
+                message_ids.append(item.message_id)
                 continue
 
             if envelope["type"] not in {ENVELOPE_TYPE_CHAT, ENVELOPE_TYPE_RECEIPT}:
@@ -929,6 +1029,7 @@ def pull(
                         "local_user_uuid": runtime.state.user_uuid,
                     },
                 )
+                message_ids.append(item.message_id)
                 continue
             if envelope["receiver_device_id"] != runtime.state.local_device_id:
                 typer.secho(f"{item.message_id}\treceiver-device-mismatch", fg=typer.colors.YELLOW)
@@ -968,16 +1069,8 @@ def pull(
                 message_ids.append(item.message_id)
                 continue
 
-            latest_counter = _latest_inbound_counter(runtime.db_manager, sender_uuid, sender_device_id)
-            if incoming_counter <= latest_counter:
-                typer.secho(
-                    f"{item.message_id}\tstale-counter={incoming_counter}\tlatest={latest_counter}",
-                    fg=typer.colors.YELLOW,
-                )
-                message_ids.append(item.message_id)
-                continue
-
-            _sync_contact_keys(runtime, sender_uuid)
+            sync_result = _sync_contact_keys(runtime, sender_uuid)
+            _warn_changed_devices(sender_uuid, sync_result.changed_devices)
             with runtime.db_manager.get_session() as db:
                 sender_device = db.get(ContactDevice, sender_device_id)
             if not sender_device or sender_device.contact_uuid != sender_uuid:
@@ -985,6 +1078,25 @@ def pull(
                     f"{item.message_id}\tmissing-sender-device-key={sender_device_id}",
                     fg=typer.colors.YELLOW,
                 )
+                message_ids.append(item.message_id)
+                continue
+
+            accepted_counter, counter_reason = _accept_inbound_counter(
+                runtime.db_manager,
+                sender_uuid,
+                sender_device_id,
+                incoming_counter,
+            )
+            if not accepted_counter:
+                typer.secho(
+                    f"{item.message_id}\t{counter_reason}",
+                    fg=typer.colors.YELLOW,
+                )
+                if counter_reason and (
+                    counter_reason.startswith("duplicate-counter")
+                    or counter_reason.startswith("outside-window")
+                ):
+                    message_ids.append(item.message_id)
                 continue
 
             session_key = derive_session_key(
@@ -1005,10 +1117,10 @@ def pull(
                 ).decode("utf-8")
             except Exception:
                 typer.secho(f"{item.message_id}\tdecrypt-failed", fg=typer.colors.YELLOW)
+                message_ids.append(item.message_id)
                 continue
 
             _mark_seen_message(runtime.db_manager, client_msg_id, sender_uuid, sender_device_id)
-            _update_inbound_counter(runtime.db_manager, sender_uuid, sender_device_id, incoming_counter)
             created_at_dt = _parse_utc_ts(envelope["created_at"])
             ttl = int(envelope["ttl"])
             _touch_conversation(runtime.db_manager, sender_uuid, increase_unread=envelope["type"] == ENVELOPE_TYPE_CHAT, at=created_at_dt)
@@ -1038,6 +1150,15 @@ def pull(
                 )
                 receipt_created = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
                 receipt_nonce = os.urandom(12)
+                receipt_session_key = derive_session_key(
+                    local_private_key_b64=identity.private_key,
+                    peer_public_key_b64=sender_device.public_key,
+                    sender_uuid=runtime.state.user_uuid,
+                    receiver_uuid=sender_uuid,
+                    sender_device_id=runtime.state.local_device_id,
+                    receiver_device_id=sender_device_id,
+                    protocol_version=PROTOCOL_VERSION,
+                )
                 receipt_envelope = {
                     "v": PROTOCOL_VERSION,
                     "type": ENVELOPE_TYPE_RECEIPT,
@@ -1053,7 +1174,7 @@ def pull(
                 }
                 receipt_payload = json.dumps({"ack_client_msg_id": client_msg_id}, separators=(",", ":")).encode("utf-8")
                 receipt_aad = _aad_metadata_bytes(receipt_envelope)
-                receipt_cipher = AESGCM(session_key).encrypt(receipt_nonce, receipt_payload, receipt_aad)
+                receipt_cipher = AESGCM(receipt_session_key).encrypt(receipt_nonce, receipt_payload, receipt_aad)
                 receipt_envelope["ciphertext"] = base64.b64encode(receipt_cipher).decode("ascii")
                 run_api_call(
                     lambda: api.send_message(
@@ -1118,13 +1239,7 @@ def sync_contact_keys(contact_uuid: str):
     require_login(runtime)
     result = _sync_contact_keys(runtime, contact_uuid)
     typer.echo(f"Synced {result.synced_devices} active device key(s) for contact {contact_uuid}.")
-    if result.changed_devices:
-        typer.secho(
-            "Warning: key changed for device(s): "
-            + ", ".join(result.changed_devices)
-            + ". Verification was reset; re-verify fingerprints.",
-            fg=typer.colors.YELLOW,
-        )
+    _warn_changed_devices(contact_uuid, result.changed_devices)
 
 
 @app.command("show-fingerprints")
@@ -1133,7 +1248,8 @@ def show_fingerprints(contact_uuid: str, refresh: bool = typer.Option(True, "--r
     runtime = build_runtime()
     require_login(runtime)
     if refresh:
-        _sync_contact_keys(runtime, contact_uuid)
+        result = _sync_contact_keys(runtime, contact_uuid)
+        _warn_changed_devices(contact_uuid, result.changed_devices)
 
     with runtime.db_manager.get_session() as db:
         rows = db.execute(

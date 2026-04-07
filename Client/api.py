@@ -20,6 +20,7 @@ if __package__:
         SendMessageResponse,
         StandardResponse,
         PendingRequestInfo,
+        BlockUserRequest,
     )
 else:
     from Schema import (
@@ -38,6 +39,7 @@ else:
         SendMessageResponse,
         StandardResponse,
         PendingRequestInfo,
+        BlockUserRequest,
     )
 
 
@@ -113,8 +115,8 @@ class ChatClientAPI:
         data = self._request("POST", "/friends/request", require_auth=True, json_data=payload.model_dump())
         return StandardResponse.model_validate(data)
 
-    def pending_requests(self) -> List[PendingRequestInfo]:
-        data = self._request("GET", "/friends/pending", require_auth=True)
+    def pending_requests(self, direction: str = "incoming") -> List[PendingRequestInfo]:
+        data = self._request("GET", f"/friends/pending?direction={direction}", require_auth=True)
         return TypeAdapter(List[PendingRequestInfo]).validate_python(data)
 
     def respond_to_request(self, payload: FriendRequestAction) -> StandardResponse:
@@ -139,4 +141,17 @@ class ChatClientAPI:
 
     def remove_friend(self, friend_uuid: str) -> StandardResponse:
         data = self._request("DELETE", f"/friends/{friend_uuid}", require_auth=True)
+        return StandardResponse.model_validate(data)
+
+    def cancel_friend_request(self, request_id: str) -> StandardResponse:
+        data = self._request("DELETE", f"/friends/request/{request_id}", require_auth=True)
+        return StandardResponse.model_validate(data)
+
+    def block_user(self, target_uuid: str) -> StandardResponse:
+        data = self._request(
+            "POST",
+            "/friends/block",
+            require_auth=True,
+            json_data=BlockUserRequest(target_uuid=target_uuid).model_dump(),
+        )
         return StandardResponse.model_validate(data)

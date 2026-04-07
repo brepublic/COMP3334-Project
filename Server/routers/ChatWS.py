@@ -5,12 +5,14 @@ import uuid
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Query, HTTPException
 from jwt.exceptions import InvalidTokenError
 from datetime import datetime, timezone
+from pydantic import ValidationError
 
 # 引入我们的组件
 from config import settings
 from ws_manager import manager
-from Server_db import OfflineMessage, Friendship
+from Server_db import OfflineMessage, Friendship, UserBlock
 from Dependency import get_db, authenticate_token
+from Schema import SendMessageRequest
 
 router = APIRouter(tags=["WebSocket"])
 
@@ -55,13 +57,14 @@ async def websocket_endpoint(
         while True:
             # 阻塞等待客户端发来的 JSON 数据
             data = await websocket.receive_json()
-            
-            # 假设客户端发来的格式是: {"receiver_uuid": "...", "ciphertext": "...", "expire_duration": 86400}
-            receiver_uuid = data.get("receiver_uuid")
-            ciphertext = data.get("ciphertext")
 
-            if not receiver_uuid or not ciphertext:
-                continue # 格式不对，忽略
+            try:
+                payload = SendMessageRequest.model_validate(data)
+            except ValidationError:
+                continue
+
+            receiver_uuid = payload.receiver_uuid
+            ciphertext = payload.ciphertext
 
             # 🚨 触发黑洞拦截机制 (Stealth Block)
             relation = db.query(Friendship).filter(
@@ -69,7 +72,18 @@ async def websocket_endpoint(
                 Friendship.user_uuid_2 == user_uuid
             ).first()
 
-            if not relation or (relation.status == "BLOCKED" and relation.blocked_by == receiver_uuid):
+            blocked = db.query(UserBlock).filter(
+                (
+                    (UserBlock.blocker_uuid == receiver_uuid)
+                    & (UserBlock.blocked_uuid == user_uuid)
+                )
+                | (
+                    (UserBlock.blocker_uuid == user_uuid)
+                    & (UserBlock.blocked_uuid == receiver_uuid)
+                )
+            ).first()
+
+            if blocked or not relation or relation.status != "FRIEND":
                 # 被拉黑了，直接假装没看见，也不往下传
                 continue 
 
@@ -92,7 +106,7 @@ async def websocket_endpoint(
                     sender_uuid=user_uuid,
                     receiver_uuid=receiver_uuid,
                     ciphertext=ciphertext,
-                    expire_duration=data.get("expire_duration", 86400)
+                    expire_duration=payload.expire_duration
                 )
                 db.add(new_offline_msg)
                 db.commit() # 落盘

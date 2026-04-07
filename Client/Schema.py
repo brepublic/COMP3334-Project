@@ -19,8 +19,8 @@ class LoginRequest(BaseModel):
     email: EmailStr
     password: str
     otp_code: str = Field(..., min_length=6, max_length=6) 
-    device_hash: str
-    device_public_key: str
+    device_hash: str = Field(..., min_length=8, max_length=128)
+    device_public_key: str = Field(..., min_length=32, max_length=512)
 
 class LoginResponse(BaseModel):
     message: str
@@ -51,8 +51,9 @@ class FriendRequestAction(BaseModel):
 
 class PendingRequestInfo(BaseModel):
     request_id: str
-    sender_uuid: str
-    sender_name: str
+    direction: Literal["incoming", "outgoing"]
+    counterparty_uuid: str
+    counterparty_name: str
 
 class FriendInfo(BaseModel):
     uuid: str
@@ -72,8 +73,8 @@ class BlockUserRequest(BaseModel):
 
 class SendMessageRequest(BaseModel):
     receiver_uuid: str
-    ciphertext: str
-    expire_duration: int = Field(default=86400, description="Default TTL is 24 hours")
+    ciphertext: str = Field(..., min_length=2, max_length=65536)
+    expire_duration: int = Field(default=86400, ge=1, le=604800, description="Default TTL is 24 hours")
 
 class SendMessageResponse(BaseModel):
     message_id: str
