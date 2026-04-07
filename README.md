@@ -200,15 +200,15 @@ Notes on sensitive server-side secrets:
 ---
 
 ## Roadmap / module checklist (tracked against spec)
-- [ ] **1. Register & Login (R1–R3)** — implemented
+- [x] **1. Register & Login (R1–R3)** — implemented
   - [x] implemented: register with email/username, store Argon2-hashed password
   - [x] implemented: login with password + TOTP
   - [x] implemented: session token expiry + logout/session invalidation (`POST /api/v1/logout` revokes current token, `POST /api/v1/logout-all` invalidates older sessions via user cutoff timestamp)
-- [ ] **2. Identity key management (R4–R6)** — TODO
-  - [ ] TODO: per-device identity keypair stored locally (encrypted) (keypair exists, but local private key is not encrypted at rest)
+- [x] **2. Identity key management (R4–R6)** — implemented
+  - [x] implemented: per-device identity keypair stored locally (encrypted with a KEK derived from login password)
   - [x] implemented: server stores device public keys
-  - [ ] TODO: fingerprint display + verified flag (DB field exists, no CLI/flow implemented)
-  - [ ] TODO: key change detection (warn + re-verify policy)
+  - [x] implemented: fingerprint display + verified flag (`sync-contact-keys`, `show-fingerprints`, `verify-device`)
+  - [x] implemented: key change detection (warn + re-verify policy, with persistent unverified state until user verifies)
 - [ ] **3. E2EE messaging (R7–R9)** — TODO
   - [ ] TODO: session establishment via X25519 + HKDF (X25519 identity key exists; no HKDF session derivation flow)
   - [ ] TODO: AEAD per message + AAD-bound metadata

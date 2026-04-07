@@ -3,12 +3,14 @@ from dataclasses import dataclass
 import pyotp
 import typer
 from qrcode import QRCode
+from sqlalchemy import select
 
 if __package__:
     from .api import ChatClientAPI, ClientAPIError
     from .CdbManager import ClientDBManager
+    from .CLient_db import ContactDevice, Conversation
     from .config import get_settings
-    from .identity import ensure_local_identity
+    from .identity import ensure_local_identity, key_fingerprint
     from .Schema import (
         AckMessagesRequest,
         FriendRequestAction,
@@ -21,8 +23,9 @@ if __package__:
 else:
     from api import ChatClientAPI, ClientAPIError
     from CdbManager import ClientDBManager
+    from CLient_db import ContactDevice, Conversation
     from config import get_settings
-    from identity import ensure_local_identity
+    from identity import ensure_local_identity, key_fingerprint
     from Schema import (
         AckMessagesRequest,
         FriendRequestAction,
@@ -42,6 +45,12 @@ class ClientRuntime:
     settings: object
     state: ClientState
     db_manager: ClientDBManager
+
+
+@dataclass
+class ContactKeySyncResult:
+    changed_devices: list[str]
+    synced_devices: int
 
 
 def build_runtime() -> ClientRuntime:
@@ -71,6 +80,66 @@ def run_api_call(callback):
     except ClientAPIError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+
+
+def _ensure_conversation_exists(db_manager: ClientDBManager, contact_uuid: str) -> None:
+    with db_manager.get_session() as db:
+        conversation = db.get(Conversation, contact_uuid)
+        if conversation:
+            return
+        db.add(
+            Conversation(
+                contact_uuid=contact_uuid,
+                contact_name=contact_uuid,
+                unread_threads=0,
+            )
+        )
+
+
+def _sync_contact_keys(runtime: ClientRuntime, contact_uuid: str) -> ContactKeySyncResult:
+    api = build_api(runtime)
+    try:
+        response = run_api_call(lambda: api.get_contact_keys(contact_uuid))
+    finally:
+        api.close()
+
+    _ensure_conversation_exists(runtime.db_manager, contact_uuid)
+    changed_devices: list[str] = []
+
+    with runtime.db_manager.get_session() as db:
+        existing_devices = db.execute(
+            select(ContactDevice).where(ContactDevice.contact_uuid == contact_uuid)
+        ).scalars().all()
+        by_device_id = {item.contact_device_id: item for item in existing_devices}
+
+        for device in response.active_devices:
+            new_hash = key_fingerprint(device.device_public_key)
+            current = by_device_id.get(device.device_id)
+            if not current:
+                db.add(
+                    ContactDevice(
+                        contact_device_id=device.device_id,
+                        contact_uuid=contact_uuid,
+                        public_key=device.device_public_key,
+                        fingerprint=new_hash,
+                        last_seen_key_hash=new_hash,
+                        is_verified=False,
+                    )
+                )
+                continue
+
+            if current.last_seen_key_hash and current.last_seen_key_hash != new_hash:
+                current.is_verified = False
+                changed_devices.append(device.device_id)
+
+            current.public_key = device.device_public_key
+            current.fingerprint = new_hash
+            current.last_seen_key_hash = new_hash
+
+    return ContactKeySyncResult(
+        changed_devices=changed_devices,
+        synced_devices=len(response.active_devices),
+    )
 
 
 def render_otp_qr_code(email: str, otp_secret: str) -> None:
@@ -120,7 +189,7 @@ def login(
 ):
     """Login and persist the token plus local device ID."""
     runtime = build_runtime()
-    identity = ensure_local_identity(runtime.db_manager)
+    identity = ensure_local_identity(runtime.db_manager, password)
     api = build_api(runtime)
     try:
         response = run_api_call(
@@ -308,6 +377,78 @@ def pull(
             typer.echo(ack_response.message)
     finally:
         api.close()
+
+
+@app.command("sync-contact-keys")
+def sync_contact_keys(contact_uuid: str):
+    """Fetch contact keys, store fingerprints, and detect key changes."""
+    runtime = build_runtime()
+    require_login(runtime)
+    result = _sync_contact_keys(runtime, contact_uuid)
+    typer.echo(f"Synced {result.synced_devices} active device key(s) for contact {contact_uuid}.")
+    if result.changed_devices:
+        typer.secho(
+            "Warning: key changed for device(s): "
+            + ", ".join(result.changed_devices)
+            + ". Verification was reset; re-verify fingerprints.",
+            fg=typer.colors.YELLOW,
+        )
+
+
+@app.command("show-fingerprints")
+def show_fingerprints(contact_uuid: str, refresh: bool = typer.Option(True, "--refresh/--no-refresh")):
+    """Show device fingerprints and verification state for a contact."""
+    runtime = build_runtime()
+    require_login(runtime)
+    if refresh:
+        _sync_contact_keys(runtime, contact_uuid)
+
+    with runtime.db_manager.get_session() as db:
+        rows = db.execute(
+            select(ContactDevice).where(ContactDevice.contact_uuid == contact_uuid)
+        ).scalars().all()
+
+    if not rows:
+        typer.echo("No device keys found. Run sync-contact-keys first.")
+        return
+
+    for item in rows:
+        status = "VERIFIED" if item.is_verified else "UNVERIFIED"
+        typer.echo(f"{item.contact_device_id}\t{status}\t{item.fingerprint}")
+
+
+@app.command("verify-device")
+def verify_device(contact_uuid: str, device_id: str):
+    """Mark one contact device as verified."""
+    runtime = build_runtime()
+    require_login(runtime)
+    with runtime.db_manager.get_session() as db:
+        record = db.get(ContactDevice, device_id)
+        if not record or record.contact_uuid != contact_uuid:
+            raise typer.BadParameter("Device not found for the specified contact.")
+        record.is_verified = True
+    typer.echo(f"Marked device {device_id} as verified.")
+
+
+@app.command("unverified-keys")
+def unverified_keys():
+    """List all unverified contact devices."""
+    runtime = build_runtime()
+    require_login(runtime)
+    with runtime.db_manager.get_session() as db:
+        rows = db.execute(
+            select(ContactDevice).where(ContactDevice.is_verified.is_(False))
+        ).scalars().all()
+
+    if not rows:
+        typer.echo("All known contact devices are verified.")
+        return
+
+    for item in rows:
+        typer.secho(
+            f"{item.contact_uuid}\t{item.contact_device_id}\t{item.fingerprint}",
+            fg=typer.colors.YELLOW,
+        )
 
 
 if __name__ == "__main__":

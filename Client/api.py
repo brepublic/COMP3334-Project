@@ -13,6 +13,7 @@ if __package__:
         LoginRequest,
         LoginResponse,
         OfflineMessageResponse,
+        ContactKeysResponse,
         RegisterRequest,
         RegisterResponse,
         SendMessageRequest,
@@ -30,6 +31,7 @@ else:
         LoginRequest,
         LoginResponse,
         OfflineMessageResponse,
+        ContactKeysResponse,
         RegisterRequest,
         RegisterResponse,
         SendMessageRequest,
@@ -130,3 +132,7 @@ class ChatClientAPI:
     def acknowledge_messages(self, payload: AckMessagesRequest) -> StandardResponse:
         data = self._request("POST", "/messages/ack", require_auth=True, json_data=payload.model_dump())
         return StandardResponse.model_validate(data)
+
+    def get_contact_keys(self, contact_uuid: str) -> ContactKeysResponse:
+        data = self._request("GET", f"/friends/{contact_uuid}/keys", require_auth=True)
+        return ContactKeysResponse.model_validate(data)

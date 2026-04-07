@@ -14,7 +14,12 @@ class LocalIdentity(Base):
     
     uuid = Column(String, primary_key=True, default=generate_uuid)
     public_key = Column(String, nullable=False)
-    private_key = Column(String, nullable=False)
+    private_key = Column(String, nullable=True)
+    private_key_encrypted = Column(String, nullable=True)
+    private_key_salt = Column(String, nullable=True)
+    private_key_kdf = Column(String, nullable=True)
+    private_key_kdf_params = Column(String, nullable=True)
+    private_key_nonce = Column(String, nullable=True)
 
 
 #---------------------------Conversation---------------------------------------------
@@ -36,6 +41,8 @@ class ContactDevice(Base):
     contact_device_id = Column(String, primary_key=True, default=generate_uuid)
     contact_uuid = Column(String, ForeignKey('conversations.contact_uuid'), nullable=False)
     public_key = Column(String, nullable=False)
+    fingerprint = Column(String, nullable=True)
+    last_seen_key_hash = Column(String, nullable=True)
     is_verified = Column(Boolean, default=False)
 
     conversation = relationship("Conversation", back_populates="devices")

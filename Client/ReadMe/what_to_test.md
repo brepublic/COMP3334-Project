@@ -60,6 +60,52 @@
   - Bob sees the message printed from offline pull
   - pull ACKs by default, so running pull again should show no offline messages
 
+  6. Identity key encryption at rest
+
+  Login once:
+
+  python3 -m Client.main login --email alice@example.com --password password123 --otp-code <real-code>
+
+  Then inspect local DB:
+
+  sqlite3 /tmp/client-a.db 'select uuid, public_key, private_key, private_key_encrypted, private_key_kdf from local_identity;'
+
+  Expected:
+
+  - `private_key` is NULL (or migrated away from legacy plaintext)
+  - `private_key_encrypted` is populated
+  - `private_key_kdf` is `scrypt`
+
+  7. Fingerprint sync and verify flow
+
+  Fetch and sync keys for Bob from Alice terminal:
+
+  python3 -m Client.main sync-contact-keys <bob_uuid>
+  python3 -m Client.main show-fingerprints <bob_uuid>
+
+  Mark one device as verified:
+
+  python3 -m Client.main verify-device <bob_uuid> <device_id>
+  python3 -m Client.main unverified-keys
+
+  Expected:
+
+  - key fingerprints are shown for each active device
+  - verification state changes after `verify-device`
+  - `unverified-keys` only lists devices still unverified
+
+  8. Key-change detection policy
+
+  Trigger a key change by re-login from Bob with a fresh local identity DB, then on Alice:
+
+  python3 -m Client.main sync-contact-keys <bob_uuid>
+
+  Expected:
+
+  - warning indicates key changed device(s)
+  - changed device is automatically marked unverified
+  - conversation remains allowed (policy: allow with persistent warning until re-verified)
+
   How to inspect whether local state is working
   Check the saved state file:
 
@@ -100,4 +146,4 @@
   - there is no E2EE yet
   - there is no websocket listen command yet
   - there is no conversation list/unread logic yet
-  - keypair is stored locally but not securely protected yet
+  - identity key decryption currently depends on the login password provided during CLI login (single-password UX; no second passphrase)
