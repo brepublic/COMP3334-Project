@@ -157,6 +157,12 @@ Limitations (explicit)
 ### Delivery states
 - **Sent**: sender client successfully submitted ciphertext to the server (server accepted).
 - **Delivered**: recipient client successfully decrypted a message and sent an **E2EE-protected `RECEIPT`** back to the sender.
+- **Read**: recipient opens the active conversation and sends an E2EE `RECEIPT` carrying read semantics.
+
+### Receipt status semantics (merged behavior)
+- Client-side status transitions are `SENT -> DELIVERED -> READ`.
+- `DELIVERED`/`READ` are derived from encrypted `RECEIPT` envelopes, not plaintext server inference.
+- WebSocket receive and offline mailbox pull share consistent receipt processing.
 
 ### Metadata disclosure statement
 Even with E2EE, the server can still learn:
@@ -175,6 +181,11 @@ Delivery receipts can further reveal **recipient online timing** (discussed in r
 - Duplicate robustness:
   - clients must safely handle duplicates from retries
   - dedup/replay rules (client_msg_id + counters) prevent accepting old ciphertext as new
+
+### Server gate consistency
+- HTTP send (`/messages/send`) and WebSocket send (`/ws/chat`) apply the same authorization gate:
+  - sender/receiver must be `FRIEND`;
+  - any `UserBlock` in either direction blocks delivery.
 
 ---
 
@@ -294,7 +305,7 @@ Table `Message`:
 - `client_msg_id` (PK)
 - `conversation_id` (FK)
 - `direction` (INBOUND/OUTBOUND)
-- `status` (SENT/DELIVERED)
+- `status` (SENT/DELIVERED/READ)
 - `message_type` (CHAT/RECEIPT)
 - `created_at`
 - `expires_at`
@@ -310,7 +321,7 @@ Table `SeenMessage` (dedup):
 ## Deployment & usage
 
 Use the full step-by-step setup and demo guide here:
-- [deploy_and_use_guide.md](/Users/tj/Downloads/project/COMP3334/deploy_and_use_guide.md)
+- [deploy_and_use_guide.md](deploy_and_use_guide.md)
 
 That document covers:
 - virtual environment setup
@@ -322,7 +333,14 @@ That document covers:
 - registration, login, OTP, contacts, fingerprints, chat, pull, history, and demo flow
 
 Additional quick demo notes remain in:
-- [what_to_test.md](/Users/tj/Downloads/project/COMP3334/Client/ReadMe/what_to_test.md)
+- [what_to_test.md](Client/ReadMe/what_to_test.md)
+
+### TLS runtime requirements
+- Server requires both `TLS_CERT_FILE` and `TLS_KEY_FILE` to start in secure mode.
+- Client transport schemes are enforced as secure:
+  - `CLIENT_SERVER_BASE_URL` must be `https://...`
+  - `CLIENT_WEBSOCKET_URL` must be `wss://...`
+- For local CA certificates (for example `mkcert`), configure Python trust (for example via `SSL_CERT_FILE`) so TLS verification succeeds.
 
 ---
 

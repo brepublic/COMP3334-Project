@@ -1,6 +1,7 @@
 # routers/Messages.py
 
 import uuid
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from typing import List
 
@@ -12,12 +13,13 @@ from Schema import (
 )
 from Server_db import User, OfflineMessage, Friendship, UserBlock
 from Dependency import get_db, get_current_user
+from ws_manager import manager
 
 router = APIRouter(tags=["Messages"])
 
 
 @router.post("/messages/send", response_model=SendMessageResponse)
-def send_message(
+async def send_message(
     request: SendMessageRequest,
     db = Depends(get_db),
     current_user_uuid: str = Depends(get_current_user)
@@ -52,7 +54,23 @@ def send_message(
             status="UNRECEIVED" 
         )
 
-    # If not blocked, put message in offline mailbox
+    # If not blocked, attempt real-time delivery first.
+    realtime_message_id = str(uuid.uuid4())
+    forward_payload = {
+        "type": "NEW_MESSAGE",
+        "message_id": realtime_message_id,
+        "sender_uuid": current_user_uuid,
+        "ciphertext": request.ciphertext,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    delivered = await manager.send_personal_message(forward_payload, request.receiver_uuid)
+    if delivered:
+        return SendMessageResponse(
+            message_id=realtime_message_id,
+            status="DELIVERED"
+        )
+
+    # Fallback to offline mailbox when receiver is not online.
     new_message = OfflineMessage(
         sender_uuid=current_user_uuid,
         receiver_uuid=request.receiver_uuid,
@@ -61,7 +79,6 @@ def send_message(
     )
     db.add(new_message)
     db.flush()
-
     return SendMessageResponse(
         message_id=new_message.message_id,
         status="UNRECEIVED"

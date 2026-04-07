@@ -11,7 +11,7 @@ from pydantic import ValidationError
 from config import settings
 from ws_manager import manager
 from Server_db import OfflineMessage, Friendship, UserBlock
-from Dependency import get_db, authenticate_token
+from Dependency import authenticate_token, db_manager
 from Schema import SendMessageRequest
 
 router = APIRouter(tags=["WebSocket"])
@@ -36,15 +36,15 @@ async def get_ws_current_user(token: str = Query(...)):
 @router.websocket("/ws/chat")
 async def websocket_endpoint(
     websocket: WebSocket, 
-    user_uuid: str = Depends(get_ws_current_user),
-    db = Depends(get_db)
+    user_uuid: str = Depends(get_ws_current_user)
 ):
     # 1. 验证失败直接踢掉断开
     if not user_uuid:
         await websocket.close(code=1008) # 1008: Policy Violation (未授权)
         return
     try:
-        authenticate_token(websocket.query_params.get("token", ""), db)
+        with db_manager.get_session() as auth_db:
+            authenticate_token(websocket.query_params.get("token", ""), auth_db)
     except HTTPException:
         await websocket.close(code=1008)
         return
@@ -67,49 +67,49 @@ async def websocket_endpoint(
             ciphertext = payload.ciphertext
 
             # 🚨 触发黑洞拦截机制 (Stealth Block)
-            relation = db.query(Friendship).filter(
-                Friendship.user_uuid_1 == receiver_uuid,
-                Friendship.user_uuid_2 == user_uuid
-            ).first()
+            with db_manager.get_session() as msg_db:
+                relation = msg_db.query(Friendship).filter(
+                    Friendship.user_uuid_1 == receiver_uuid,
+                    Friendship.user_uuid_2 == user_uuid
+                ).first()
 
-            blocked = db.query(UserBlock).filter(
-                (
-                    (UserBlock.blocker_uuid == receiver_uuid)
-                    & (UserBlock.blocked_uuid == user_uuid)
-                )
-                | (
-                    (UserBlock.blocker_uuid == user_uuid)
-                    & (UserBlock.blocked_uuid == receiver_uuid)
-                )
-            ).first()
+                blocked = msg_db.query(UserBlock).filter(
+                    (
+                        (UserBlock.blocker_uuid == receiver_uuid)
+                        & (UserBlock.blocked_uuid == user_uuid)
+                    )
+                    | (
+                        (UserBlock.blocker_uuid == user_uuid)
+                        & (UserBlock.blocked_uuid == receiver_uuid)
+                    )
+                ).first()
 
-            if blocked or not relation or relation.status != "FRIEND":
-                # 被拉黑了，直接假装没看见，也不往下传
-                continue 
+                if blocked or not relation or relation.status != "FRIEND":
+                    # 被拉黑了，直接假装没看见，也不往下传
+                    continue
 
-            ws_message_id = str(uuid.uuid4())
+                ws_message_id = str(uuid.uuid4())
 
-            # 4. 尝试实时投递给 Bob
-            forward_payload = {
-                "type": "NEW_MESSAGE",
-                "message_id": ws_message_id,
-                "sender_uuid": user_uuid,
-                "ciphertext": ciphertext,
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            }
-            
-            is_online = await manager.send_personal_message(forward_payload, receiver_uuid)
+                # 4. 尝试实时投递给 Bob
+                forward_payload = {
+                    "type": "NEW_MESSAGE",
+                    "message_id": ws_message_id,
+                    "sender_uuid": user_uuid,
+                    "ciphertext": ciphertext,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
 
-            # 5. 如果 Bob 不在线，必须存入离线数据库保底！
-            if not is_online:
-                new_offline_msg = OfflineMessage(
-                    sender_uuid=user_uuid,
-                    receiver_uuid=receiver_uuid,
-                    ciphertext=ciphertext,
-                    expire_duration=payload.expire_duration
-                )
-                db.add(new_offline_msg)
-                db.commit() # 落盘
+                is_online = await manager.send_personal_message(forward_payload, receiver_uuid)
+
+                # 5. 如果 Bob 不在线，必须存入离线数据库保底！
+                if not is_online:
+                    new_offline_msg = OfflineMessage(
+                        sender_uuid=user_uuid,
+                        receiver_uuid=receiver_uuid,
+                        ciphertext=ciphertext,
+                        expire_duration=payload.expire_duration
+                    )
+                    msg_db.add(new_offline_msg)
 
     except WebSocketDisconnect:
         # 6. 如果客户端断网、杀后台，捕获异常并让管家把他从字典里删掉
