@@ -69,6 +69,14 @@ class FriendRequest(Base):
     sender = relationship("User", foreign_keys=[sender_uuid], back_populates="sent_requests")
     receiver = relationship("User", foreign_keys=[receiver_uuid], back_populates="received_requests")
 
+
+class FriendRequestRateLimit(Base):
+    __tablename__ = "friend_request_rate_limits"
+
+    sender_uuid = Column(String, ForeignKey("users.uuid"), primary_key=True)
+    blocked_until = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
 #——-----------------------------------------Offline Message-----------------------------
 class OfflineMessage(Base):
     __tablename__ = 'offline_messages'

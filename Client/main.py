@@ -100,7 +100,9 @@ def _run_interactive_shell() -> None:
     typer.echo("Interactive mode started. Type 'help' for usage, 'exit' to quit.")
     while True:
         try:
-            raw = input("client> ").strip()
+            runtime = build_runtime()
+            prompt_user = runtime.state.user_name or "guest"
+            raw = input(f"{prompt_user}@client> ").strip()
         except EOFError:
             typer.echo()
             typer.echo("Exiting interactive mode.")
@@ -170,6 +172,26 @@ def run_api_call(callback):
     except ClientAPIError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+
+
+def _print_columns(headers: list[str], rows: list[list[str]]) -> None:
+    if not headers:
+        return
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for idx, cell in enumerate(row):
+            widths[idx] = max(widths[idx], len(cell))
+    header_line = "\t".join(headers[idx].ljust(widths[idx]) for idx in range(len(headers)))
+    typer.echo(header_line)
+    for row in rows:
+        typer.echo("\t".join(row[idx].ljust(widths[idx]) for idx in range(len(headers))))
+
+
+def _short_text(value: str, limit: int = 40) -> str:
+    value = value.strip()
+    if len(value) <= limit:
+        return value
+    return value[: limit - 3] + "..."
 
 
 def _ensure_conversation_exists(db_manager: ClientDBManager, contact_uuid: str) -> None:
@@ -508,6 +530,7 @@ def login(
 
     runtime.state.set_auth(
         user_uuid=response.user_uuid,
+        user_name=response.user_name,
         access_token=response.access_token,
         token_type=response.token_type,
     )
@@ -575,13 +598,15 @@ def friends_list():
         typer.echo("No friends found.")
         return
 
+    rows: list[list[str]] = []
     for friend in response.friends:
         _touch_conversation(
             runtime.db_manager,
             friend.uuid,
             contact_name=friend.user_name,
         )
-        typer.echo(f"{friend.user_name}\t{friend.uuid}\t{friend.status}")
+        rows.append([friend.user_name, friend.uuid, friend.status, friend.email or "-"])
+    _print_columns(["Username", "UUID", "Status", "Email"], rows)
 
 
 @app.command("add-friend")
@@ -600,6 +625,27 @@ def add_friend(target_email: str):
     typer.echo(response.message)
 
 
+@app.command("remove-friend")
+def remove_friend(username: str):
+    """Remove a friend by username (with duplicate disambiguation)."""
+    runtime = build_runtime()
+    require_login(runtime)
+    api = build_api(runtime)
+    try:
+        response = run_api_call(api.list_friends)
+        matches = [f for f in response.friends if f.user_name == username]
+        if not matches:
+            typer.echo(f"No friend found with username: {username}")
+            return
+        selected = matches[0] if len(matches) == 1 else _select_friend_interactively(
+            matches, "Multiple users share this username:"
+        )
+        remove_response = run_api_call(lambda: api.remove_friend(selected.uuid))
+    finally:
+        api.close()
+    typer.echo(remove_response.message)
+
+
 @app.command()
 def pending():
     """List pending incoming friend requests."""
@@ -615,8 +661,8 @@ def pending():
         typer.echo("No pending requests.")
         return
 
-    for request in requests:
-        typer.echo(f"{request.request_id}\t{request.sender_name}\t{request.sender_uuid}")
+    rows = [[req.request_id, req.sender_name, req.sender_uuid] for req in requests]
+    _print_columns(["RequestID", "SenderName", "SenderUUID"], rows)
 
 
 @app.command()
@@ -637,86 +683,53 @@ def accept(request_id: str):
     typer.echo(response.message)
 
 
-@app.command()
-def chat(
-    receiver_uuid: str,
-    message: str,
-    ttl: int = typer.Option(86400, "--ttl", min=1, help="Expiry in seconds."),
-    password: str = typer.Option(..., prompt=True, hide_input=True, help="Login password to unlock local identity key."),
-):
-    """Send an E2EE payload through the current message API."""
-    runtime = build_runtime()
-    require_login(runtime)
+def _select_friend_interactively(options: list, title: str) -> object | None:
+    if not options:
+        return None
+    rows = []
+    for idx, item in enumerate(options, start=1):
+        rows.append([str(idx), item.user_name, item.email or "-", item.uuid])
+    typer.echo(title)
+    _print_columns(["No", "Username", "Email", "UUID"], rows)
+    selected = typer.prompt("Select by number", type=int)
+    if selected < 1 or selected > len(options):
+        raise typer.BadParameter("Invalid selection.")
+    return options[selected - 1]
+
+
+def _show_recent_chat(runtime: ClientRuntime, contact_uuid: str, limit: int = 12) -> None:
+    with runtime.db_manager.get_session() as db:
+        rows = db.execute(
+            select(Message)
+            .where(Message.conversation_id == contact_uuid, Message.message_type == ENVELOPE_TYPE_CHAT)
+            .order_by(Message.receive_at.desc())
+            .limit(limit)
+        ).scalars().all()
+    if not rows:
+        typer.echo("No local history for this chat.")
+        return
+    output = []
+    for row in reversed(rows):
+        direction = "OUT" if row.sender_id == runtime.state.user_uuid else "IN"
+        ts = row.receive_at.isoformat() if row.receive_at else "-"
+        output.append(
+            [ts, direction, row.status, "N/A", str(row.expire_duration), _short_text(row.content_plaintext, 72)]
+        )
+    _print_columns(["Time", "Dir", "Delivery", "Read", "TTL", "Message"], output)
+
+
+def _send_chat_payload(runtime: ClientRuntime, receiver_uuid: str, message: str, ttl: int, password: str) -> None:
     if not runtime.state.user_uuid:
         raise typer.BadParameter("No saved user UUID found. Run login first.")
-
     identity = ensure_local_identity(runtime.db_manager, password)
     _ensure_conversation_exists(runtime.db_manager, receiver_uuid)
     _sync_contact_keys(runtime, receiver_uuid)
-    device = None
     with runtime.db_manager.get_session() as db:
         device = db.execute(
             select(ContactDevice).where(ContactDevice.contact_uuid == receiver_uuid)
         ).scalars().first()
-        _debug_log(
-            "pre-fix",
-            "H2",
-            "Client/main.py:chat:db-select-device",
-            "Selected contact device in active session",
-            {
-                "receiver_uuid": receiver_uuid,
-                "device_found": device is not None,
-                "session_bound_before_close": object_session(device) is not None if device else False,
-                "db_expire_on_commit": bool(getattr(db, "expire_on_commit", False)),
-            },
-        )
-        _debug_log(
-            "post-fix",
-            "H11",
-            "Client/main.py:chat:local-device-candidates",
-            "Current local contact device candidates after sync",
-            {
-                "receiver_uuid": receiver_uuid,
-                "candidate_device_ids": [
-                    row.contact_device_id
-                    for row in db.execute(
-                        select(ContactDevice).where(ContactDevice.contact_uuid == receiver_uuid)
-                    ).scalars().all()
-                ],
-            },
-        )
-    _debug_log(
-        "pre-fix",
-        "H2",
-        "Client/main.py:chat:after-session-close",
-        "Contact device state immediately after session context",
-        {
-            "device_found": device is not None,
-            "session_bound_after_close": object_session(device) is not None if device else False,
-        },
-    )
     if not device:
         raise typer.BadParameter("No contact device key found. Run sync-contact-keys first.")
-    try:
-        _debug_log(
-            "pre-fix",
-            "H2",
-            "Client/main.py:chat:attr-access",
-            "Attempting detached-sensitive device attribute access",
-            {
-                "contact_device_id": device.contact_device_id,
-                "public_key_len": len(device.public_key or ""),
-            },
-        )
-    except Exception as exc:
-        _debug_log(
-            "pre-fix",
-            "H2",
-            "Client/main.py:chat:attr-access-error",
-            "Device attribute access failed",
-            {"error": str(exc)},
-        )
-        raise
 
     counter = _next_counter(runtime.db_manager, receiver_uuid, device.contact_device_id, "OUTBOUND")
     created_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -744,18 +757,6 @@ def chat(
         "created_at": created_at,
         "nonce": base64.b64encode(nonce).decode("ascii"),
     }
-    _debug_log(
-        "post-fix",
-        "H7",
-        "Client/main.py:chat:envelope-target",
-        "Prepared outbound envelope routing fields",
-        {
-            "sender_uuid": runtime.state.user_uuid,
-            "sender_device_id": runtime.state.local_device_id,
-            "receiver_uuid": receiver_uuid,
-            "receiver_device_id": device.contact_device_id,
-        },
-    )
     aad = _aad_metadata_bytes(envelope)
     ciphertext = AESGCM(session_key).encrypt(nonce, message.encode("utf-8"), aad)
     envelope["ciphertext"] = base64.b64encode(ciphertext).decode("ascii")
@@ -789,9 +790,79 @@ def chat(
         status="SENT",
     )
     _touch_conversation(runtime.db_manager, receiver_uuid, at=created_at_dt)
-
     typer.echo(f"Server message ID: {response.message_id}")
     typer.echo(f"Server status: {response.status}")
+
+
+@app.command()
+def chat(
+    username: str | None = typer.Argument(None, help="Friend username to chat with."),
+):
+    """Open interactive chat session."""
+    runtime = build_runtime()
+    require_login(runtime)
+    api = build_api(runtime)
+    try:
+        friends_response = run_api_call(api.list_friends)
+    finally:
+        api.close()
+    if not friends_response.friends:
+        typer.echo("No friends found.")
+        return
+
+    if username:
+        matches = [f for f in friends_response.friends if f.user_name == username]
+        if not matches:
+            typer.echo(f"No friend found with username: {username}")
+            return
+        selected = matches[0] if len(matches) == 1 else _select_friend_interactively(
+            matches, "Multiple users share this username:"
+        )
+    else:
+        with runtime.db_manager.get_session() as db:
+            latest_by_contact = {}
+            for msg in db.execute(select(Message).order_by(Message.receive_at.desc())).scalars().all():
+                latest_by_contact.setdefault(msg.conversation_id, msg.content_plaintext)
+        rows = []
+        for idx, friend in enumerate(friends_response.friends, start=1):
+            rows.append([str(idx), friend.user_name, _short_text(latest_by_contact.get(friend.uuid, "-"), 60)])
+        _print_columns(["No", "Username", "LastMessage"], rows)
+        pick = typer.prompt("Select chat by number", type=int)
+        if pick < 1 or pick > len(friends_response.friends):
+            raise typer.BadParameter("Invalid selection.")
+        selected = friends_response.friends[pick - 1]
+
+    if not selected:
+        return
+    _touch_conversation(runtime.db_manager, selected.uuid, contact_name=selected.user_name, clear_unread=True)
+    password = typer.prompt("Password", hide_input=True)
+    default_ttl = 86400
+    typer.echo(f"Entering chat with {selected.user_name} ({selected.uuid})")
+    typer.echo("Commands: /back | /refresh | /ttl <seconds> <message> ; plain text sends with default ttl.")
+    _show_recent_chat(runtime, selected.uuid)
+    while True:
+        line = input(f"chat:{selected.user_name}> ").strip()
+        if not line:
+            continue
+        if line == "/back":
+            return
+        if line == "/refresh":
+            _show_recent_chat(runtime, selected.uuid)
+            continue
+        if line.startswith("/ttl "):
+            parts = line.split(" ", 2)
+            if len(parts) != 3 or not parts[1].isdigit():
+                typer.secho("Usage: /ttl <seconds> <message>", fg=typer.colors.YELLOW)
+                continue
+            send_ttl = int(parts[1])
+            send_body = parts[2].strip()
+        else:
+            send_ttl = default_ttl
+            send_body = line
+        if not send_body:
+            typer.secho("Message cannot be empty.", fg=typer.colors.YELLOW)
+            continue
+        _send_chat_payload(runtime, selected.uuid, send_body, send_ttl, password)
 
 
 @app.command()
@@ -1073,9 +1144,11 @@ def show_fingerprints(contact_uuid: str, refresh: bool = typer.Option(True, "--r
         typer.echo("No device keys found. Run sync-contact-keys first.")
         return
 
+    output_rows = []
     for item in rows:
         status = "VERIFIED" if item.is_verified else "UNVERIFIED"
-        typer.echo(f"{item.contact_device_id}\t{status}\t{item.fingerprint}")
+        output_rows.append([item.contact_device_id, status, item.fingerprint or "-"])
+    _print_columns(["DeviceID", "Status", "Fingerprint"], output_rows)
 
 
 @app.command("verify-device")
@@ -1105,11 +1178,8 @@ def unverified_keys():
         typer.echo("All known contact devices are verified.")
         return
 
-    for item in rows:
-        typer.secho(
-            f"{item.contact_uuid}\t{item.contact_device_id}\t{item.fingerprint}",
-            fg=typer.colors.YELLOW,
-        )
+    output_rows = [[item.contact_uuid, item.contact_device_id, item.fingerprint or "-"] for item in rows]
+    _print_columns(["ContactUUID", "DeviceID", "Fingerprint"], output_rows)
 
 
 @app.command("my-fingerprint")
@@ -1167,10 +1237,11 @@ def conversations():
     if not rows:
         typer.echo("No local conversations.")
         return
+    output_rows: list[list[str]] = []
     for row in rows:
         try:
             ts = row.last_activity.isoformat() if row.last_activity else "-"
-            typer.echo(f"{row.contact_uuid}\t{row.contact_name}\tunread={row.unread_threads}\tlast_activity={ts}")
+            output_rows.append([row.contact_uuid, row.contact_name, str(row.unread_threads), ts])
         except Exception as exc:
             _debug_log(
                 "pre-fix",
@@ -1180,6 +1251,7 @@ def conversations():
                 {"error": str(exc)},
             )
             raise
+    _print_columns(["ContactUUID", "ContactName", "Unread", "LastActivity"], output_rows)
 
 
 @app.command("history")
@@ -1204,13 +1276,21 @@ def history(
         typer.echo("No local history for this conversation.")
         _touch_conversation(runtime.db_manager, contact_uuid, clear_unread=True)
         return
+    output_rows: list[list[str]] = []
     for row in rows:
         ts = row.receive_at.isoformat() if row.receive_at else "-"
-        ack = f"\tack={row.ack_client_msg_id}" if row.ack_client_msg_id else ""
         client_id = row.client_msg_id or "-"
-        typer.echo(
-            f"{ts}\t{row.message_type}\t{row.status}\tclient_msg_id={client_id}{ack}\t{row.content_plaintext}"
+        output_rows.append(
+            [
+                ts,
+                row.message_type,
+                row.status,
+                client_id,
+                row.ack_client_msg_id or "-",
+                _short_text(row.content_plaintext, 80),
+            ]
         )
+    _print_columns(["Time", "Type", "Status", "ClientMsgID", "AckClientMsgID", "Message"], output_rows)
     _touch_conversation(runtime.db_manager, contact_uuid, clear_unread=True)
 
 

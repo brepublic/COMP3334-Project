@@ -149,6 +149,7 @@ Limitations (explicit)
 - Default anti-spam:
   - **non-friends cannot send arbitrary chat messages**
   - only friend requests are allowed from non-friends
+  - if a user sends **10 or more friend requests within 1 minute**, the user is blocked from sending new friend requests for **30 minutes**
 
 ---
 
@@ -217,6 +218,7 @@ Notes on sensitive server-side secrets:
 - [x] **4. Contact management (R13–R16)** — implemented
   - [x] implemented: request/accept/decline; block/unblock
   - [x] implemented: default anti-spam: non-friends cannot message
+  - [x] implemented: friend-request spam control (`>=10 / 1 minute` triggers `30 minutes` cooldown)
 - [x] **5. Offline messages (R20–R22)** — implemented
   - [x] implemented: ciphertext queue store-and-forward
   - [x] implemented: ACK/cleanup policy (ack delete + periodic expiry cleanup)
@@ -329,6 +331,20 @@ Run interactive CLI mode (new behavior):
   - `friends`
   - `pending`
   - `help chat`
+- Prompt format:
+  - logged-out: `guest@client>`
+  - logged-in: `<username>@client>`
+- `chat` command (interactive session):
+  - `chat <username>`: open chat directly; if duplicate usernames exist, the client shows numbered candidates (`username + email + uuid`) to choose from
+  - `chat` (without args): opens friend list (`No + Username + LastMessage`) for selection
+  - in chat session:
+    - plain text sends a message with default TTL
+    - `/ttl <seconds> <message>` sends a self-destruct message with custom TTL
+    - `/refresh` reloads recent local chat view
+    - `/back` exits chat session
+- `remove-friend <username>`:
+  - remove a friend by username
+  - duplicate usernames are disambiguated via numbered selection (`username + email + uuid`)
 - Exit REPL with `exit`, `quit`, or `Ctrl+D`.
 - Pressing `Ctrl+C` inside REPL cancels current input and keeps the session running.
 

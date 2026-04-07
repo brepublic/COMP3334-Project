@@ -136,3 +136,7 @@ class ChatClientAPI:
     def get_contact_keys(self, contact_uuid: str) -> ContactKeysResponse:
         data = self._request("GET", f"/friends/{contact_uuid}/keys", require_auth=True)
         return ContactKeysResponse.model_validate(data)
+
+    def remove_friend(self, friend_uuid: str) -> StandardResponse:
+        data = self._request("DELETE", f"/friends/{friend_uuid}", require_auth=True)
+        return StandardResponse.model_validate(data)

@@ -25,6 +25,7 @@ class LoginRequest(BaseModel):
 class LoginResponse(BaseModel):
     message: str
     user_uuid: str
+    user_name: str
     access_token: str
     token_type: str = "bearer"
 
@@ -56,6 +57,7 @@ class PendingRequestInfo(BaseModel):
 class FriendInfo(BaseModel):
     uuid: str
     user_name: str
+    email: Optional[EmailStr] = None
     status: Literal["FRIEND", "BLOCKED"] 
     blocked_by: Optional[str] = None
 

@@ -83,6 +83,7 @@ def login_user(request: Request, payload: LoginRequest, db=Depends(get_db)):
     return LoginResponse(
         message="Login Succeed!",
         user_uuid=user.uuid,
+        user_name=user.user_name,
         access_token=access_token,
         token_type="bearer"
     )
