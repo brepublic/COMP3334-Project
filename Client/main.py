@@ -1,9 +1,12 @@
 from dataclasses import dataclass
+import asyncio
 import base64
 import json
 import os
 import shlex
 import sys
+import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
@@ -31,6 +34,7 @@ if __package__:
         SendMessageRequest,
     )
     from .state import ClientState
+    from .ws_client import connect_chat_socket
 else:
     from api import ChatClientAPI, ClientAPIError
     from CdbManager import ClientDBManager
@@ -46,6 +50,7 @@ else:
         SendMessageRequest,
     )
     from state import ClientState
+    from ws_client import connect_chat_socket
 
 
 app = typer.Typer(help="Phase 1 CLI client for the COMP3334 chat server.")
@@ -63,11 +68,22 @@ class ContactKeySyncResult:
     changed_devices: list[str]
     synced_devices: int
 
+
+@dataclass
+class IncomingMessageItem:
+    message_id: str
+    sender_uuid: str | None
+    ciphertext: str
+    expire_duration: int = 86400
+    created_at: datetime | None = None
+
 PROTOCOL_VERSION = 1
 ENVELOPE_TYPE_CHAT = "CHAT"
 ENVELOPE_TYPE_RECEIPT = "RECEIPT"
+
 DEBUG_LOG_PATH = os.getenv("CLIENT_DEBUG_LOG_PATH")
 DEBUG_SESSION_ID = os.getenv("CLIENT_DEBUG_SESSION_ID", "default")
+
 
 
 def _debug_log(run_id: str, hypothesis_id: str, location: str, message: str, data: dict) -> None:
@@ -104,6 +120,7 @@ def _run_interactive_shell() -> None:
     while True:
         try:
             runtime = build_runtime()
+            _start_auto_receiver_if_possible(runtime)
             prompt_user = runtime.state.user_name or "guest"
             raw = input(f"{prompt_user}@client> ").strip()
         except EOFError:
@@ -192,6 +209,7 @@ def _warn_changed_devices(contact_uuid: str, changed_devices: list[str]) -> None
 def require_login(runtime: ClientRuntime) -> None:
     if not runtime.state.access_token:
         raise typer.BadParameter("No saved login token found. Run the login command first.")
+    _start_auto_receiver_if_possible(runtime)
 
 
 def run_api_call(callback):
@@ -200,6 +218,12 @@ def run_api_call(callback):
     except ClientAPIError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+
+
+def _remember_session_password(password: str) -> None:
+    global _SESSION_PASSWORD
+    if password:
+        _SESSION_PASSWORD = password
 
 
 def _print_columns(headers: list[str], rows: list[list[str]]) -> None:
@@ -220,6 +244,54 @@ def _short_text(value: str, limit: int = 40) -> str:
     if len(value) <= limit:
         return value
     return value[: limit - 3] + "..."
+
+
+def _format_fingerprint_for_display(fingerprint: str | None) -> str:
+    if not fingerprint:
+        return "-"
+    cleaned = "".join(ch for ch in fingerprint if ch.isalnum()).upper()
+    if not cleaned:
+        return "-"
+    return " ".join(cleaned[idx : idx + 4] for idx in range(0, len(cleaned), 4))
+
+
+def _choose_friend_by_username(friends: list, username: str):
+    matches = [f for f in friends if f.user_name == username]
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+    return _select_friend_interactively(matches, "Multiple users share this username:")
+
+
+def _resolve_contact_uuid(runtime: ClientRuntime, contact_identifier: str) -> str:
+    api = build_api(runtime)
+    try:
+        friends_response = run_api_call(api.list_friends)
+    finally:
+        api.close()
+
+    # Prefer exact UUID match first.
+    uuid_matches = [f for f in friends_response.friends if f.uuid == contact_identifier]
+    if len(uuid_matches) == 1:
+        return uuid_matches[0].uuid
+
+    email_matches = [
+        f for f in friends_response.friends if (f.email or "").lower() == contact_identifier.lower()
+    ]
+    if len(email_matches) == 1:
+        return email_matches[0].uuid
+    if len(email_matches) > 1:
+        selected = _select_friend_interactively(email_matches, "Multiple users share this email:")
+        if not selected:
+            raise typer.BadParameter("Could not resolve contact from email.")
+        return selected.uuid
+
+    selected_by_username = _choose_friend_by_username(friends_response.friends, contact_identifier)
+    if selected_by_username:
+        return selected_by_username.uuid
+
+    raise typer.BadParameter("Contact not found. Use UUID, email, or username from friends list.")
 
 
 def _ensure_conversation_exists(db_manager: ClientDBManager, contact_uuid: str) -> None:
@@ -253,7 +325,6 @@ def _sync_contact_keys(runtime: ClientRuntime, contact_uuid: str) -> ContactKeyS
         ).scalars().all()
         by_device_id = {item.contact_device_id: item for item in existing_devices}
         active_device_ids = {device.device_id for device in response.active_devices}
-
         for device in response.active_devices:
             new_hash = key_fingerprint(device.device_public_key)
             current = by_device_id.get(device.device_id)
@@ -414,10 +485,12 @@ def _parse_utc_ts(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+
 def _ensure_utc(value: datetime | None) -> datetime | None:
     if value is None:
         return None
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
 
 
 def _touch_conversation(
@@ -489,11 +562,14 @@ def _cleanup_expired_local_messages(db_manager: ClientDBManager) -> int:
         expired_ids: list[str] = []
         for row in rows:
             if row.expires_at:
+
                 expires_at = _ensure_utc(row.expires_at)
             else:
                 received = _ensure_utc(row.receive_at) or now
+
                 expires_at = received + timedelta(seconds=max(0, int(row.expire_duration or 0)))
-            if expires_at <= now:
+            should_expire = expires_at <= now
+            if should_expire:
                 expired_ids.append(row.message_id)
         if not expired_ids:
             return 0
@@ -514,6 +590,322 @@ def _mark_outbound_delivered_by_client_msg_id(db_manager: ClientDBManager, conve
             return False
         msg.status = "DELIVERED"
         return True
+
+
+def _process_incoming_messages(
+    runtime: ClientRuntime,
+    identity,
+    incoming_messages: list[IncomingMessageItem],
+    *,
+    output: bool = True,
+    acknowledge: bool = True,
+) -> int:
+    if not runtime.state.user_uuid or not incoming_messages:
+        return 0
+
+    processed_count = 0
+    ack_message_ids: list[str] = []
+    api = build_api(runtime)
+    try:
+        for item in incoming_messages:
+            try:
+                envelope = json.loads(item.ciphertext)
+            except json.JSONDecodeError:
+                if output:
+                    typer.secho(f"{item.message_id}\tinvalid-envelope-json", fg=typer.colors.YELLOW)
+                continue
+
+            required_fields = {
+                "v",
+                "type",
+                "client_msg_id",
+                "sender_uuid",
+                "receiver_uuid",
+                "sender_device_id",
+                "receiver_device_id",
+                "counter",
+                "ttl",
+                "created_at",
+                "nonce",
+                "ciphertext",
+            }
+            if not required_fields.issubset(envelope.keys()):
+                if output:
+                    typer.secho(f"{item.message_id}\tmissing-envelope-fields", fg=typer.colors.YELLOW)
+                continue
+
+            if envelope["type"] not in {ENVELOPE_TYPE_CHAT, ENVELOPE_TYPE_RECEIPT}:
+                if output:
+                    typer.secho(f"{item.message_id}\tunsupported-type={envelope['type']}", fg=typer.colors.YELLOW)
+                ack_message_ids.append(item.message_id)
+                continue
+            if envelope["receiver_uuid"] != runtime.state.user_uuid:
+                if output:
+                    typer.secho(f"{item.message_id}\treceiver-mismatch", fg=typer.colors.YELLOW)
+                continue
+            if envelope["receiver_device_id"] != runtime.state.local_device_id:
+                if output:
+                    typer.secho(f"{item.message_id}\treceiver-device-mismatch", fg=typer.colors.YELLOW)
+                ack_message_ids.append(item.message_id)
+                continue
+
+            client_msg_id = envelope["client_msg_id"]
+            sender_uuid = envelope["sender_uuid"]
+            sender_device_id = envelope["sender_device_id"]
+            incoming_counter = int(envelope["counter"])
+
+            _ensure_conversation_exists(runtime.db_manager, sender_uuid)
+            if _is_seen_message(runtime.db_manager, client_msg_id):
+                ack_message_ids.append(item.message_id)
+                continue
+
+            latest_counter = _latest_inbound_counter(runtime.db_manager, sender_uuid, sender_device_id)
+            if incoming_counter <= latest_counter:
+                ack_message_ids.append(item.message_id)
+                continue
+
+            _sync_contact_keys(runtime, sender_uuid)
+            with runtime.db_manager.get_session() as db:
+                sender_device = db.get(ContactDevice, sender_device_id)
+            if not sender_device or sender_device.contact_uuid != sender_uuid:
+                if output:
+                    typer.secho(f"{item.message_id}\tmissing-sender-device-key={sender_device_id}", fg=typer.colors.YELLOW)
+                continue
+
+            session_key = derive_session_key(
+                local_private_key_b64=identity.private_key,
+                peer_public_key_b64=sender_device.public_key,
+                sender_uuid=sender_uuid,
+                receiver_uuid=runtime.state.user_uuid,
+                sender_device_id=sender_device_id,
+                receiver_device_id=runtime.state.local_device_id,
+                protocol_version=PROTOCOL_VERSION,
+            )
+            aad = _aad_metadata_bytes(envelope)
+            try:
+                plaintext = AESGCM(session_key).decrypt(
+                    base64.b64decode(envelope["nonce"].encode("ascii")),
+                    base64.b64decode(envelope["ciphertext"].encode("ascii")),
+                    aad,
+                ).decode("utf-8")
+            except Exception:
+                if output:
+                    typer.secho(f"{item.message_id}\tdecrypt-failed", fg=typer.colors.YELLOW)
+                continue
+
+            _mark_seen_message(runtime.db_manager, client_msg_id, sender_uuid, sender_device_id)
+            _update_inbound_counter(runtime.db_manager, sender_uuid, sender_device_id, incoming_counter)
+            created_at_dt = _parse_utc_ts(envelope["created_at"])
+            ttl = int(envelope["ttl"])
+            _touch_conversation(runtime.db_manager, sender_uuid, increase_unread=envelope["type"] == ENVELOPE_TYPE_CHAT, at=created_at_dt)
+
+            if envelope["type"] == ENVELOPE_TYPE_CHAT:
+                _save_message(
+                    runtime.db_manager,
+                    conversation_id=sender_uuid,
+                    sender_id=sender_uuid,
+                    receiver_id=runtime.state.user_uuid,
+                    content_plaintext=plaintext,
+                    ttl=ttl,
+                    received_at=created_at_dt,
+                    client_msg_id=client_msg_id,
+                    message_type=ENVELOPE_TYPE_CHAT,
+                    status="DELIVERED",
+                )
+                if output:
+                    typer.echo(
+                        f"{item.message_id}\tfrom={sender_uuid}\tcounter={incoming_counter}\tttl={ttl}\tmessage={plaintext}"
+                    )
+
+                receipt_counter = _next_counter(runtime.db_manager, sender_uuid, sender_device_id, "OUTBOUND")
+                receipt_created = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                receipt_nonce = os.urandom(12)
+                receipt_envelope = {
+                    "v": PROTOCOL_VERSION,
+                    "type": ENVELOPE_TYPE_RECEIPT,
+                    "client_msg_id": str(uuid.uuid4()),
+                    "sender_uuid": runtime.state.user_uuid,
+                    "receiver_uuid": sender_uuid,
+                    "sender_device_id": runtime.state.local_device_id,
+                    "receiver_device_id": sender_device_id,
+                    "counter": receipt_counter,
+                    "ttl": ttl,
+                    "created_at": receipt_created,
+                    "nonce": base64.b64encode(receipt_nonce).decode("ascii"),
+                }
+                receipt_payload = json.dumps({"ack_client_msg_id": client_msg_id}, separators=(",", ":")).encode("utf-8")
+                receipt_aad = _aad_metadata_bytes(receipt_envelope)
+                receipt_cipher = AESGCM(session_key).encrypt(receipt_nonce, receipt_payload, receipt_aad)
+                receipt_envelope["ciphertext"] = base64.b64encode(receipt_cipher).decode("ascii")
+                run_api_call(
+                    lambda: api.send_message(
+                        SendMessageRequest(
+                            receiver_uuid=sender_uuid,
+                            ciphertext=json.dumps(receipt_envelope, separators=(",", ":")),
+                            expire_duration=ttl,
+                        )
+                    )
+                )
+            else:
+                try:
+                    receipt_data = json.loads(plaintext)
+                except json.JSONDecodeError:
+                    if output:
+                        typer.secho(f"{item.message_id}\tinvalid-receipt-body", fg=typer.colors.YELLOW)
+                    ack_message_ids.append(item.message_id)
+                    continue
+                ack_client_msg_id = receipt_data.get("ack_client_msg_id")
+                if not ack_client_msg_id:
+                    if output:
+                        typer.secho(f"{item.message_id}\treceipt-missing-ack-id", fg=typer.colors.YELLOW)
+                    ack_message_ids.append(item.message_id)
+                    continue
+                updated = _mark_outbound_delivered_by_client_msg_id(runtime.db_manager, sender_uuid, ack_client_msg_id)
+                _save_message(
+                    runtime.db_manager,
+                    conversation_id=sender_uuid,
+                    sender_id=sender_uuid,
+                    receiver_id=runtime.state.user_uuid,
+                    content_plaintext=f"receipt:{ack_client_msg_id}",
+                    ttl=ttl,
+                    received_at=created_at_dt,
+                    client_msg_id=client_msg_id,
+                    message_type=ENVELOPE_TYPE_RECEIPT,
+                    status="DELIVERED",
+                    ack_client_msg_id=ack_client_msg_id,
+                )
+                if output:
+                    if updated:
+                        typer.secho(
+                            f"{item.message_id}\treceipt-ack={ack_client_msg_id}\tstatus=DELIVERED",
+                            fg=typer.colors.GREEN,
+                        )
+                    else:
+                        typer.secho(
+                            f"{item.message_id}\treceipt-ack={ack_client_msg_id}\tlocal-message-not-found",
+                            fg=typer.colors.YELLOW,
+                        )
+            ack_message_ids.append(item.message_id)
+            processed_count += 1
+
+        if acknowledge and ack_message_ids:
+            ack_response = run_api_call(lambda: api.acknowledge_messages(AckMessagesRequest(message_ids=ack_message_ids)))
+            if output:
+                typer.echo(ack_response.message)
+    finally:
+        api.close()
+    return processed_count
+
+
+def _pull_once(runtime: ClientRuntime, identity, *, ack: bool, output: bool) -> int:
+    api = build_api(runtime)
+    try:
+        response = run_api_call(api.pull_messages)
+    finally:
+        api.close()
+    if not response.messages:
+        if output:
+            typer.echo("No offline messages.")
+        return 0
+    incoming = [
+        IncomingMessageItem(
+            message_id=item.message_id,
+            sender_uuid=item.sender_uuid,
+            ciphertext=item.ciphertext,
+            expire_duration=item.expire_duration,
+            created_at=item.created_at,
+        )
+        for item in response.messages
+    ]
+    return _process_incoming_messages(runtime, identity, incoming, output=output, acknowledge=ack)
+
+
+async def _auto_receiver_ws_loop(runtime: ClientRuntime, identity) -> None:
+    assert runtime.state.access_token
+    backoff = 1
+    while not _AUTO_RECEIVER_STOP.is_set():
+        try:
+            websocket = await connect_chat_socket(runtime.settings.websocket_url, runtime.state.access_token)
+            backoff = 1
+            while not _AUTO_RECEIVER_STOP.is_set():
+                raw = await asyncio.wait_for(websocket.recv(), timeout=1.0)
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8")
+                payload = json.loads(raw)
+                if payload.get("type") != "NEW_MESSAGE":
+                    continue
+                incoming = [
+                    IncomingMessageItem(
+                        message_id=str(payload.get("message_id", str(uuid.uuid4()))),
+                        sender_uuid=payload.get("sender_uuid"),
+                        ciphertext=str(payload.get("ciphertext", "")),
+                    )
+                ]
+                _process_incoming_messages(runtime, identity, incoming, output=True, acknowledge=False)
+        except asyncio.TimeoutError:
+            continue
+        except Exception:
+            await asyncio.sleep(min(backoff, AUTO_PULL_BACKOFF_MAX_SECONDS))
+            backoff = min(backoff * 2, AUTO_PULL_BACKOFF_MAX_SECONDS)
+
+
+def _auto_receiver_worker() -> None:
+    while not _AUTO_RECEIVER_STOP.is_set():
+        runtime = build_runtime()
+        if not runtime.state.access_token:
+            time.sleep(1)
+            continue
+        if not _SESSION_PASSWORD:
+            time.sleep(1)
+            continue
+        try:
+            identity = ensure_local_identity(runtime.db_manager, _SESSION_PASSWORD)
+        except Exception:
+            time.sleep(1)
+            continue
+
+        try:
+            asyncio.run(_auto_receiver_ws_loop(runtime, identity))
+        except Exception:
+            pass
+
+        if _AUTO_RECEIVER_STOP.is_set():
+            break
+        try:
+            _pull_once(runtime, identity, ack=True, output=False)
+        except Exception:
+            pass
+        time.sleep(AUTO_PULL_INTERVAL_SECONDS)
+
+
+def _start_auto_receiver_if_possible(runtime: ClientRuntime) -> None:
+    global _AUTO_RECEIVER_THREAD, _AUTO_RECEIVER_STARTED_FOR_USER
+    if not runtime.state.access_token or not runtime.state.user_uuid:
+        return
+    if not _SESSION_PASSWORD:
+        return
+    with _AUTO_RECEIVER_LOCK:
+        if (
+            _AUTO_RECEIVER_THREAD
+            and _AUTO_RECEIVER_THREAD.is_alive()
+            and _AUTO_RECEIVER_STARTED_FOR_USER == runtime.state.user_uuid
+        ):
+            return
+        _AUTO_RECEIVER_STOP.clear()
+        _AUTO_RECEIVER_STARTED_FOR_USER = runtime.state.user_uuid
+        _AUTO_RECEIVER_THREAD = threading.Thread(target=_auto_receiver_worker, name="auto-receiver", daemon=True)
+        _AUTO_RECEIVER_THREAD.start()
+
+
+def _stop_auto_receiver() -> None:
+    global _AUTO_RECEIVER_THREAD, _AUTO_RECEIVER_STARTED_FOR_USER
+    with _AUTO_RECEIVER_LOCK:
+        if not _AUTO_RECEIVER_THREAD:
+            return
+        _AUTO_RECEIVER_STOP.set()
+        _AUTO_RECEIVER_THREAD.join(timeout=2)
+        _AUTO_RECEIVER_THREAD = None
+        _AUTO_RECEIVER_STARTED_FOR_USER = None
 
 
 def render_otp_qr_code(email: str, otp_secret: str) -> None:
@@ -563,6 +955,7 @@ def login(
 ):
     """Login and persist the token plus local device ID."""
     runtime = build_runtime()
+    _remember_session_password(password)
     identity = ensure_local_identity(runtime.db_manager, password)
     api = build_api(runtime)
     try:
@@ -607,6 +1000,7 @@ def login(
 def logout():
     """Logout current session and revoke current token on server."""
     runtime = build_runtime()
+    _stop_auto_receiver()
     require_login(runtime)
     api = build_api(runtime)
     try:
@@ -623,6 +1017,7 @@ def logout():
 def logout_all():
     """Invalidate all existing sessions for current account."""
     runtime = build_runtime()
+    _stop_auto_receiver()
     require_login(runtime)
     api = build_api(runtime)
     try:
@@ -685,13 +1080,10 @@ def remove_friend(username: str):
     api = build_api(runtime)
     try:
         response = run_api_call(api.list_friends)
-        matches = [f for f in response.friends if f.user_name == username]
-        if not matches:
+        selected = _choose_friend_by_username(response.friends, username)
+        if not selected:
             typer.echo(f"No friend found with username: {username}")
             return
-        selected = matches[0] if len(matches) == 1 else _select_friend_interactively(
-            matches, "Multiple users share this username:"
-        )
         remove_response = run_api_call(lambda: api.remove_friend(selected.uuid))
     finally:
         api.close()
@@ -858,7 +1250,6 @@ def _send_chat_payload(runtime: ClientRuntime, receiver_uuid: str, message: str,
     ciphertext = AESGCM(session_key).encrypt(nonce, message.encode("utf-8"), aad)
     envelope["ciphertext"] = base64.b64encode(ciphertext).decode("ascii")
     envelope_blob = json.dumps(envelope, separators=(",", ":"))
-
     api = build_api(runtime)
     try:
         response = run_api_call(
@@ -898,6 +1289,7 @@ def chat(
     """Open interactive chat session."""
     runtime = build_runtime()
     require_login(runtime)
+    _start_auto_receiver_if_possible(runtime)
     api = build_api(runtime)
     try:
         friends_response = run_api_call(api.list_friends)
@@ -908,13 +1300,10 @@ def chat(
         return
 
     if username:
-        matches = [f for f in friends_response.friends if f.user_name == username]
-        if not matches:
+        selected = _choose_friend_by_username(friends_response.friends, username)
+        if not selected:
             typer.echo(f"No friend found with username: {username}")
             return
-        selected = matches[0] if len(matches) == 1 else _select_friend_interactively(
-            matches, "Multiple users share this username:"
-        )
     else:
         with runtime.db_manager.get_session() as db:
             latest_by_contact = {}
@@ -934,26 +1323,41 @@ def chat(
     _cleanup_expired_local_messages(runtime.db_manager)
     _touch_conversation(runtime.db_manager, selected.uuid, contact_name=selected.user_name, clear_unread=True)
     password = typer.prompt("Password", hide_input=True)
+    _remember_session_password(password)
+    _start_auto_receiver_if_possible(runtime)
     default_ttl = 86400
     typer.echo(f"Entering chat with {selected.user_name} ({selected.uuid})")
-    typer.echo("Commands: /back | /refresh | /ttl <seconds> <message> ; plain text sends with default ttl.")
+    typer.echo(
+        "Commands: /back|/exit|/quit | /refresh | /ttl <seconds> <message>. "
+        "Use //text to send a message that starts with '/'."
+    )
     _show_recent_chat(runtime, selected.uuid)
     while True:
         line = input(f"chat:{selected.user_name}> ").strip()
         if not line:
             continue
-        if line == "/back":
+        if line.startswith("//"):
+            send_ttl = default_ttl
+            send_body = line[1:]
+        elif line in {"/back", "/exit", "/quit"}:
             return
-        if line == "/refresh":
+        elif line == "/refresh":
             _show_recent_chat(runtime, selected.uuid)
             continue
-        if line.startswith("/ttl "):
+        elif line.startswith("/ttl "):
             parts = line.split(" ", 2)
             if len(parts) != 3 or not parts[1].isdigit():
                 typer.secho("Usage: /ttl <seconds> <message>", fg=typer.colors.YELLOW)
                 continue
             send_ttl = int(parts[1])
             send_body = parts[2].strip()
+        elif line.startswith("/"):
+            typer.secho(
+                "Unknown command. Available: /back /exit /quit /refresh /ttl <seconds> <message>. "
+                "To send slash-prefixed text, use //.",
+                fg=typer.colors.YELLOW,
+            )
+            continue
         else:
             send_ttl = default_ttl
             send_body = line
@@ -971,6 +1375,7 @@ def pull(
     """Pull offline messages and optionally ACK them."""
     runtime = build_runtime()
     require_login(runtime)
+    _start_auto_receiver_if_possible(runtime)
     expired = _cleanup_expired_local_messages(runtime.db_manager)
     if expired:
         typer.secho(f"Cleaned {expired} expired local message(s).", fg=typer.colors.BLUE)
@@ -1232,6 +1637,7 @@ def pull(
         api.close()
 
 
+
 @app.command("sync-contact-keys")
 def sync_contact_keys(contact_uuid: str):
     """Fetch contact keys, store fingerprints, and detect key changes."""
@@ -1242,11 +1648,25 @@ def sync_contact_keys(contact_uuid: str):
     _warn_changed_devices(contact_uuid, result.changed_devices)
 
 
-@app.command("show-fingerprints")
-def show_fingerprints(contact_uuid: str, refresh: bool = typer.Option(True, "--refresh/--no-refresh")):
+def _show_fingerprints_impl(
+    contact_identifier: str,
+    refresh: bool = True,
+    show_device_id: bool = False,
+) -> None:
     """Show device fingerprints and verification state for a contact."""
     runtime = build_runtime()
     require_login(runtime)
+    contact_uuid = _resolve_contact_uuid(runtime, contact_identifier)
+    contact_email = contact_uuid
+    api = build_api(runtime)
+    try:
+        friends_response = run_api_call(api.list_friends)
+    finally:
+        api.close()
+    for friend in friends_response.friends:
+        if friend.uuid == contact_uuid:
+            contact_email = str(friend.email) if friend.email else friend.uuid
+            break
     if refresh:
         result = _sync_contact_keys(runtime, contact_uuid)
         _warn_changed_devices(contact_uuid, result.changed_devices)
@@ -1262,9 +1682,45 @@ def show_fingerprints(contact_uuid: str, refresh: bool = typer.Option(True, "--r
 
     output_rows = []
     for item in rows:
-        status = "VERIFIED" if item.is_verified else "UNVERIFIED"
-        output_rows.append([item.contact_device_id, status, item.fingerprint or "-"])
-    _print_columns(["DeviceID", "Status", "Fingerprint"], output_rows)
+        status = "verified" if item.is_verified else "unverified"
+        if show_device_id:
+            output_rows.append(
+                [
+                    contact_email,
+                    item.contact_device_id,
+                    status,
+                    _format_fingerprint_for_display(item.fingerprint),
+                ]
+            )
+        else:
+            output_rows.append(
+                [
+                    contact_email,
+                    status,
+                    _format_fingerprint_for_display(item.fingerprint),
+                ]
+            )
+    if show_device_id:
+        _print_columns(["Email", "DeviceID", "Status", "Fingerprint"], output_rows)
+        return
+    _print_columns(["Email", "Status", "Fingerprint"], output_rows)
+
+
+@app.command("show-fingerprints")
+def show_fingerprints(
+    contact_identifier: str = typer.Argument(
+        ...,
+        metavar="CONTACT_IDENTIFIER",
+        help="Contact identifier: friend UUID, email, or username.",
+    ),
+    refresh: bool = typer.Option(True, "--refresh/--no-refresh"),
+    show_device_id: bool = typer.Option(False, "--show-device-id"),
+):
+    _show_fingerprints_impl(
+        contact_identifier=contact_identifier,
+        refresh=refresh,
+        show_device_id=show_device_id,
+    )
 
 
 @app.command("verify-device")
@@ -1314,7 +1770,7 @@ def my_fingerprint():
     fingerprint = key_fingerprint(identity.public_key)
     typer.echo(f"user_uuid={runtime.state.user_uuid}")
     typer.echo(f"device_id={runtime.state.local_device_id}")
-    typer.echo(f"fingerprint={fingerprint}")
+    typer.echo(f"fingerprint={_format_fingerprint_for_display(fingerprint)}")
 
 
 @app.command("conversations")

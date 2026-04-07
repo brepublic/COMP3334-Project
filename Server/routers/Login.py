@@ -79,7 +79,6 @@ def login_user(request: Request, payload: LoginRequest, db=Depends(get_db)):
         device_public_key=payload.device_public_key
     )
     db.add(new_device)
-
     # Sign JWT
     access_token_expires = timedelta(days=settings.ACCESS_TOKEN_EXPIRE_DAYS)
     access_token = create_access_token(

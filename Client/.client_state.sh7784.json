@@ -1,7 +1,7 @@
 {
-  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhMTQ5NGFlMS1kN2ExLTRhYzktOGFhOC1iMDg4NmViZGQyYjciLCJpYXQiOjE3NzU1NjQxMTMsImV4cCI6MTc3NjE2ODkxMywianRpIjoiNjBiOGQ2OTYtYTQwNS00YWE0LTlhZWQtMTA5NGJkMmI2MGI3In0.xL83IXqI10NaznwprtwxqY5hxPP-hnic6Y8Z72IwbOo",
+  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI1ZTUxZDVhMi1iNGZjLTQ4MTUtOTJjMy1kMDcyZmUyMzRjNmMiLCJpYXQiOjE3NzU1NjQzODQsImV4cCI6MTc3NjE2OTE4NCwianRpIjoiNzAyNmU1MmQtZWU2My00NzA0LThlNTQtZTIzOGY2NWRjNjczIn0.u52jEkSrWaKcUJRD0mI9e-XJdIQ568qQAYuvmXcNzqU",
   "token_type": "bearer",
-  "user_uuid": "a1494ae1-d7a1-4ac9-8aa8-b0886ebdd2b7",
-  "user_name": "sb",
+  "user_uuid": "5e51d5a2-b4fc-4815-92c3-d072fe234c6c",
+  "user_name": "colin",
   "local_device_id": "2737b2d6-7819-4f19-aa3d-d37e2acf39e2"
 }
