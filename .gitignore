@@ -9,3 +9,6 @@ __pycache__/
 
 # test files
 test_dbs.py
+
+# .venv
+.venv/
