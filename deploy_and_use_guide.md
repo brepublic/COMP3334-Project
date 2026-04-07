@@ -225,6 +225,12 @@ After login, the client stores:
 - local device ID
 - local encrypted identity private key
 
+To log out the current session later:
+
+```bash
+python -m Client.main logout
+```
+
 ## 12. Add A Friend
 
 From Alice's terminal:
