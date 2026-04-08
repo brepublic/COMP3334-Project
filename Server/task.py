@@ -1,11 +1,13 @@
 # tasks.py
 
 import asyncio
+import logging
 from datetime import datetime, timezone, timedelta
 from SdbManager import ServerDBManager
 from Server_db import OfflineMessage
 
 db_manager = ServerDBManager()
+logger = logging.getLogger(__name__)
 
 def cleanup_expired_messages():
     """
@@ -28,8 +30,7 @@ def cleanup_expired_messages():
             deleted_count = db.query(OfflineMessage).filter(
                 OfflineMessage.message_id.in_(expired_ids)
             ).delete(synchronize_session=False)
-            
-            print(f"Successfully deleted {deleted_count} expired offline messages.")
+            logger.info("Deleted %s expired offline messages.", deleted_count)
 
 
 async def periodic_cleanup_task():

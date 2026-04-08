@@ -1,6 +1,7 @@
 # routers/Messages.py
 
 import uuid
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from typing import List
 
@@ -10,19 +11,19 @@ from Schema import (
     OfflineMessageResponse, OfflineMessageItem, 
     AckMessagesRequest, StandardResponse
 )
-from Server_db import User, OfflineMessage, Friendship
+from Server_db import User, OfflineMessage, Friendship, UserBlock
 from Dependency import get_db, get_current_user
+from ws_manager import manager
 
 router = APIRouter(tags=["Messages"])
 
 
 @router.post("/messages/send", response_model=SendMessageResponse)
-def send_message(
+async def send_message(
     request: SendMessageRequest,
     db = Depends(get_db),
     current_user_uuid: str = Depends(get_current_user)
 ):
-    
     # Check if Friend exists
     receiver = db.query(User).filter(User.uuid == request.receiver_uuid).first()
     if not receiver:
@@ -34,7 +35,18 @@ def send_message(
         Friendship.user_uuid_2 == current_user_uuid
     ).first()
 
-    if not relation or (relation.status == "BLOCKED" and relation.blocked_by == request.receiver_uuid):
+    blocked = db.query(UserBlock).filter(
+        (
+            (UserBlock.blocker_uuid == request.receiver_uuid)
+            & (UserBlock.blocked_uuid == current_user_uuid)
+        )
+        | (
+            (UserBlock.blocker_uuid == current_user_uuid)
+            & (UserBlock.blocked_uuid == request.receiver_uuid)
+        )
+    ).first()
+
+    if blocked or not relation or relation.status != "FRIEND":
         # If the sender is blocked by receiver, return a fake success message
         fake_message_id = str(uuid.uuid4())
         return SendMessageResponse(
@@ -42,7 +54,23 @@ def send_message(
             status="UNRECEIVED" 
         )
 
-    # If not blocked, put message in offline mailbox
+    # If not blocked, attempt real-time delivery first.
+    realtime_message_id = str(uuid.uuid4())
+    forward_payload = {
+        "type": "NEW_MESSAGE",
+        "message_id": realtime_message_id,
+        "sender_uuid": current_user_uuid,
+        "ciphertext": request.ciphertext,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    delivered = await manager.send_personal_message(forward_payload, request.receiver_uuid)
+    if delivered:
+        return SendMessageResponse(
+            message_id=realtime_message_id,
+            status="DELIVERED"
+        )
+
+    # Fallback to offline mailbox when receiver is not online.
     new_message = OfflineMessage(
         sender_uuid=current_user_uuid,
         receiver_uuid=request.receiver_uuid,
@@ -50,7 +78,7 @@ def send_message(
         expire_duration=request.expire_duration
     )
     db.add(new_message)
-
+    db.flush()
     return SendMessageResponse(
         message_id=new_message.message_id,
         status="UNRECEIVED"
@@ -66,7 +94,7 @@ def get_offline_messages(
     # get all offline message destinated to requester
     messages = db.query(OfflineMessage).filter(
         OfflineMessage.receiver_uuid == current_user_uuid
-    ).all()
+    ).order_by(OfflineMessage.created_at.asc(), OfflineMessage.message_id.asc()).all()
 
     # Return as specified in shcema
     msg_list = []

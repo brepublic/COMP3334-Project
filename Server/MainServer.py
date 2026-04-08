@@ -1,3 +1,5 @@
+import logging
+import ssl
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -8,18 +10,49 @@ from limitor import limiter
 # Import FastAPI functions form routers
 from routers import Register, Login, Contacts, Message, ChatWS
 from task import periodic_cleanup_task
+from config import settings
+
+
+logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL.upper(), logging.WARNING))
+logger = logging.getLogger(__name__)
+
+
+def require_tls_configuration(*, allow_insecure_override: bool | None = None) -> tuple[str | None, str | None]:
+    ssl_certfile = settings.TLS_CERT_FILE
+    ssl_keyfile = settings.TLS_KEY_FILE
+
+    if bool(ssl_certfile) != bool(ssl_keyfile):
+        raise RuntimeError("TLS_CERT_FILE and TLS_KEY_FILE must either both be set or both be unset.")
+
+    if ssl_certfile and ssl_keyfile:
+        if not ssl_certfile.is_file():
+            raise RuntimeError(f"TLS certificate file does not exist: {ssl_certfile}")
+        if not ssl_keyfile.is_file():
+            raise RuntimeError(f"TLS key file does not exist: {ssl_keyfile}")
+        return str(ssl_certfile), str(ssl_keyfile)
+
+    if allow_insecure_override is None:
+        allow_insecure_override = settings.ALLOW_INSECURE_TEST_MODE
+    if allow_insecure_override:
+        return None, None
+
+    raise RuntimeError(
+        "TLS_CERT_FILE and TLS_KEY_FILE must be set to start the server. "
+        "Tests may opt in via ALLOW_INSECURE_TEST_MODE=true."
+    )
 
 
 # Initialize offline message cleaning
 @asynccontextmanager
 async def cleanUp(app: FastAPI):
-    print("Evoking expired message cleaner...")
+    require_tls_configuration()
+    logger.info("Starting expired message cleaner.")
     # Add cleaning offline message to background task loop
     task = asyncio.create_task(periodic_cleanup_task())
     # return control to FastAPI
     yield 
     task.cancel()
-    print("Expired message cleaner off.")
+    logger.info("Expired message cleaner stopped.")
 
 # initialize main program
 # This defines the FastAPI setting, as well as the automatically generated file
@@ -61,5 +94,14 @@ def main():
 
 if __name__ == "__main__":
     import uvicorn
-    # Start the server
-    uvicorn.run("MainServer:app", host="0.0.0.0", port=8000, reload=True)
+    ssl_certfile, ssl_keyfile = require_tls_configuration()
+
+    uvicorn.run(
+        "MainServer:app",
+        host=settings.SERVER_HOST,
+        port=settings.SERVER_PORT,
+        reload=settings.SERVER_RELOAD,
+        ssl_certfile=ssl_certfile,
+        ssl_keyfile=ssl_keyfile,
+        ssl_version=ssl.PROTOCOL_TLS_SERVER if ssl_certfile and ssl_keyfile else None,
+    )

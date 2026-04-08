@@ -1,456 +1,357 @@
-## COMP3334 Secure IM (1:1) — Design + Requirements Mapping
+## COMP3334 Secure IM (E2EE) — Design & Usage
 
-This repository is a **secure instant messaging (IM)** system for **1:1 private chat** under an **honest-but-curious (HbC)** server model. The server provides registration/authentication, friend/contact management, public key distribution, message relay, and **offline ciphertext store-and-forward**. **End-to-end encryption (E2EE) is a client responsibility.**
+This repository implements a **1:1 secure instant messaging system** with **end-to-end encryption (E2EE)**, an **honest-but-curious** server, and a **CLI-based client** (GUI is not required).
 
-This README is a **design document** that maps directly to the COMP3334 requirements (R1–R25) and also states the **current implementation status** in this repository (**Implemented / Partial / Planned**). It is written to be consistent with the current codebase and does **not** claim unimplemented security properties as already delivered.
+### Project scope (explicit)
+- **1:1 private chat only**: no group chats.
+- **No multi-device synchronization**: each client instance is treated as a single device for the project demo.
+- **Server model**: honest-but-curious (HbC). The server relays and stores **ciphertext only** and must not learn plaintext.
 
-## Scope (project constraints)
-- **1:1 only**: no group chat requirement.
-- **No multi-device message synchronization requirement**: the current server implementation enforces **single active device** per user by deleting older device records on login.
-- **Client UI**: a CLI client is acceptable.
+---
 
-## Required feature summary (what this system is designed to provide)
-- **E2EE 1:1 private chat** (client-side; planned in this repo).
-- **Timed self-destruct messages** (server best-effort TTL cleanup implemented for offline ciphertext; client deletion planned).
-- **User registration + login (password + OTP)** (implemented on server).
-- **Friend requests / contact management** (implemented on server).
-- **Offline messaging (ciphertext store-and-forward)** (implemented on server).
-- **Message delivery status (Sent / Delivered)** (semantics specified; implementation partial/planned).
-- **Conversation list and unread counters** (client-side; planned in this repo).
-
-## Threat model and security goals
+## Threat model & security goals (spec-aligned)
 ### Threat model
-- **HbC server**: follows the protocol but may inspect databases, logs, and all application-layer data; may perform traffic analysis (timestamps, message sizes, contact graph).
-- **Network attacker**: may observe traffic and attempt MITM if transport security is misconfigured; may cause duplication/reordering at lower layers.
-- **Malicious users/clients**: may create accounts, spam friend requests, send malformed messages, replay ciphertexts, or attempt impersonation at the UI layer.
+- **HbC server**: follows protocol but may inspect databases/logs and perform traffic analysis (timestamps, sizes, contact graph).
+- **Network attacker**: can observe traffic; may attempt MITM if transport security is misconfigured; may duplicate/reorder packets.
+- **Malicious clients/users**: can spam friend requests, send malformed messages, replay ciphertext, or attempt UI-layer impersonation.
 
 ### Security goals
-- **End-to-end confidentiality against the server**: the server must not be able to decrypt message contents.
-- **End-to-end integrity + authentication between users**: attackers should not forge/modify messages undetectably.
-- **Replay resistance / de-duplication**: replayed/duplicated ciphertext must not be accepted as new.
-- **Key change visibility**: identity key changes must be visible to users with a defined policy.
+- **Confidentiality vs server**: server cannot decrypt message contents.
+- **Integrity + authentication**: attackers cannot forge/modify messages undetectably for conversations they are not part of.
+- **Replay resistance**: duplicated/replayed ciphertext is not accepted as a new message.
+- **Key change visibility**: if a contact’s identity key changes, users are warned and the policy is clear.
 
-## System architecture (trust boundaries)
-### Components
-- **Client (planned/partial in this repo)**: E2EE logic (keys, handshake, AEAD), verification UI/state, replay window, self-destruct UI/local deletion, conversation list + unread counters + paging.
-- **Server (implemented)**: registration/authentication, friend requests/contact management, public key distribution, message relay, offline ciphertext queue storage, best-effort TTL cleanup, and abuse controls (rate limiting).
+---
 
-### Trust boundaries
-- **Trusted**: each client device’s local storage and runtime.
-- **Untrusted**: server storage/logs and the network.
+## Architecture & trust boundaries
+### Client responsibilities (trusted endpoint)
+- Generate and store a **per-device long-term identity keypair** locally.
+- Fetch contacts’ **public keys** and establish a shared secret.
+- Perform **AEAD encryption/decryption**, validate authenticated metadata (AAD), and reject tampering.
+- Maintain **replay/dedup state**, **TTL self-destruct behavior**, **conversation list**, and **unread counters**.
+- Produce **delivery receipts** (E2EE-protected) to define “Delivered”.
 
-### Layering and separation of concerns
-Server code follows a “separation of concerns” style: database/connection management, schemas (DTOs), authentication dependency, and routers are separated into focused files to keep each module’s responsibility clear.
+### Server responsibilities (untrusted for plaintext)
+- Registration/login (password + OTP), session tokens, logout/invalidation.
+- Friend request workflow, block/unblock enforcement, anti-spam defaults.
+- Distribute **public keys only** (no private keys).
+- Relay messages and store offline **ciphertext queues** (store-and-forward).
 
-### Data-flow overview
+---
 
-```mermaid
-flowchart TD
-  ClientA[Client_A] -->|TLS_HTTP:register/login| Server[Server_API]
-  ClientB[Client_B] -->|TLS_HTTP:register/login| Server
+## Cryptography choices (primitives, libraries, safe usage)
+This project uses well-reviewed libraries; we do **not** implement cryptographic primitives from scratch.
 
-  ClientA -->|TLS_HTTP:friend_request| Server
-  Server -->|pending_requests| ClientB
-  ClientB -->|accept_or_reject| Server
+- **Password hashing**: Argon2 (via `argon2-cffi`), with per-user salt.
+- **OTP (2FA)**: TOTP (via `pyotp`).
+- **Transport security**: TLS for HTTP and WebSocket connections.
+- **E2EE building blocks** (via `cryptography`):
+  - **Key agreement**: X25519.
+  - **KDF**: HKDF-SHA256 with domain-separated context strings.
+  - **Authenticated encryption (AEAD)**: ChaCha20-Poly1305 *or* AES-256-GCM.
+  - **Hash/fingerprint**: SHA-256 over canonical public key bytes.
+- **Randomness**: cryptographically secure RNG from the OS (library-backed).
+- **Nonce safety**: AEAD nonces are generated uniquely per message; nonce reuse under the same key is forbidden.
 
-  ClientA -->|TLS_HTTP:get_contact_keys| Server
-  Server -->|device_public_keys| ClientA
+---
 
-  ClientA -->|TLS_WS_or_HTTP:send_ciphertext| Server
-  Server -->|WS_push_if_online| ClientB
-  Server -->|queue_ciphertext_if_offline| ServerDB[(Offline_ciphertext_queue)]
-  ClientB -->|TLS_HTTP:pull_offline_ciphertext| Server
-  ClientB -->|TLS_HTTP:ack_message_ids| Server
-  Server -->|delete_acked_ciphertext| ServerDB
-```
+## Identity & key management (R4–R6)
+### Per-device identity keypair
+- Each client generates a **long-term identity keypair** on first run (per device).
+- The server stores **only public keys** (per device) so others can initiate secure sessions.
 
-## Cryptographic design (E2EE) — client-side specification
-**Status in this repository**: **Planned (not implemented in `Client/`)**.
+### Fingerprint / verification UI
+- For each contact device public key, the client computes a **fingerprint** (e.g., SHA-256 → safety number / hex) and shows it to the user.
+- User can mark a contact/device as **verified** (local state is acceptable).
 
-The server currently transports an opaque `ciphertext` string. The design below specifies how clients must generate keys, establish sessions, encrypt messages, provide replay protection, implement key change visibility, and implement self-destruct. This is required for the system to actually achieve E2EE under the HbC model.
+### Key change detection policy (explicit)
+- The client stores the last-seen key hash for each contact device.
+- When keys are fetched/refreshed:
+  - If the key hash changes, the client **warns the user**, marks the device **unverified**, and records the change.
+  - **Policy** (chosen for usability): allow continuing the conversation **with a persistent warning** until re-verified.
+    - Rationale: avoids hard lockout during legitimate re-installs while still making key changes visible.
 
-### Cryptographic library requirements (R4, R7, R8, Security Requirements)
-We must use well-reviewed libraries for primitives (AEAD, signatures, KDF, RNG). Do not implement primitives.
+---
 
-For a Python client, acceptable options include:
-- **`cryptography`**: AEAD (AES-GCM / ChaCha20-Poly1305), X25519, Ed25519, HKDF, SHA-256.
-- **PyNaCl / libsodium bindings**: X25519/Ed25519, AEAD, hashing, RNG.
+## Secure session establishment (R7)
+To establish a shared secret for 1:1 messaging under an HbC server:
+- Sender fetches receiver device public key(s) from the server.
+- Sender derives a shared secret using **X25519** DH between sender identity private key and receiver identity public key.
+- A session key is derived with **HKDF**:
+  - input key material = DH shared secret
+  - salt/info include both user IDs + device IDs + protocol version (domain separation)
 
-The report must record **library names and versions**, algorithm parameters (nonce sizes, key sizes), and how nonces/randomness are generated.
+Limitations (documented honestly):
+- This minimal static-DH design does **not** provide strong forward secrecy comparable to full ratcheting designs (e.g., Signal Double Ratchet). It is acceptable for this course if described clearly; future work can add prekeys/ratcheting.
 
-### Identity keys and verification (R4–R6)
-- **Per-device identity keypair** (generated and stored locally by the client):
-  - **Ed25519** identity signing keypair (authenticates handshake / identity).
-  - **X25519** key agreement keypair (ECDH).
-- **Server storage**: server stores only the device public keys needed for others to initiate sessions; **private keys never leave the client**.
-- **Fingerprint / safety number UI**:
-  - Fingerprint \(=\) `SHA-256(identity_signing_public_key)` encoded as Base32/hex.
-  - Client lets the user mark a device as **Verified** (local-only state is acceptable).
-- **Key change detection policy**:
-  - If a contact’s identity key changes, show a warning and enforce the policy.
-  - **Policy**: **block sending to that device until re-verified** (recommended, simple, and explicit).
+---
 
-### Secure session establishment (R7)
-Protocol goal: authenticated key agreement without trusting the server.
+## E2EE message format, AAD binding, replay/dedup (R8–R9)
+### Crypto envelope (canonical fields)
+Messages are transmitted as a JSON “envelope” that contains metadata plus AEAD ciphertext:
 
-One implementable design:
-- **Key discovery**: fetch recipient device public keys from the server (only if friends).
-- **Signed ephemeral ECDH handshake**:
-  - Sender creates ephemeral X25519 keypair and sends `hello` containing:
-    - sender identity signing public key identifier
-    - sender ephemeral public key
-    - signature over the handshake transcript (Ed25519)
-  - Receiver verifies signature using the stored identity signing public key and replies with its own signed ephemeral public key.
-  - Both sides compute ECDH shared secret and derive symmetric keys using **HKDF-SHA256**.
+- `v`: protocol version
+- `type`: `CHAT` or `RECEIPT`
+- `client_msg_id`: UUID generated by sender (unique)
+- `sender_uuid`, `receiver_uuid`
+- `sender_device_id` (or key id / fingerprint)
+- `counter`: per-(sender_device, receiver) monotonic counter
+- `ttl_seconds`: time-to-live for self-destruct
+- `created_at`: RFC3339 timestamp
+- `nonce`: base64 AEAD nonce
+- `ciphertext`: base64 AEAD ciphertext+tag
 
-This is not a full Signal Double Ratchet; forward secrecy depends on ephemeral usage and re-handshake frequency. This limitation must be stated in the report.
+### Authenticated Associated Data (AAD)
+The following fields are bound as AAD (must match exactly on decrypt):
+- `v`, `type`, `client_msg_id`
+- `sender_uuid`, `receiver_uuid`
+- `sender_device_id`
+- `counter`, `ttl_seconds`, `created_at`
 
-#### Handshake wire format (planned)
-The following JSON structures are **client-to-client logical messages** that the server relays as opaque ciphertext payloads (or as dedicated handshake messages, depending on client implementation).
+This detects tampering of routing/TTL/counters even if ciphertext is unchanged.
 
-```json
-{
-  "type": "E2EE_HELLO",
-  "sender_uuid": "uuid-a",
-  "receiver_uuid": "uuid-b",
-  "sender_device_id": "device-id-a",
-  "sender_identity_sign_pk": "base64(ed25519_pk)",
-  "sender_ephemeral_dh_pk": "base64(x25519_ephemeral_pk)",
-  "handshake_id": "uuid",
-  "client_sent_time": "2026-04-07T12:00:00Z",
-  "signature": "base64(ed25519_sig_over_transcript)"
-}
-```
+### Replay resistance / de-duplication
+Receiver enforces:
+- **Uniqueness**: reject any `client_msg_id` already seen for this conversation.
+- **Counter monotonicity**: track the highest counter per sender device; reject duplicated counters. To tolerate network duplication/reordering, allow a small reordering window (e.g., accept counters in \([max_seen+1, max_seen+W]\) and keep a bitmap/seen-set within the window).
+- Maintain a local **SeenMessage** store (e.g., DB table) so replays remain rejected across restarts.
 
-```json
-{
-  "type": "E2EE_HELLO_ACK",
-  "sender_uuid": "uuid-b",
-  "receiver_uuid": "uuid-a",
-  "sender_device_id": "device-id-b",
-  "sender_identity_sign_pk": "base64(ed25519_pk)",
-  "sender_ephemeral_dh_pk": "base64(x25519_ephemeral_pk)",
-  "handshake_id": "uuid",
-  "client_sent_time": "2026-04-07T12:00:01Z",
-  "signature": "base64(ed25519_sig_over_transcript)"
-}
-```
+---
 
-After both sides verify signatures, they compute:
-- \(ss = X25519(ephemeral\_sk, peer\_ephemeral\_pk)\)
-- `session_id = SHA-256(transcript_bytes)`
-- `k_send`, `k_recv` from `HKDF-SHA256(ss, salt=session_id, info=...)`
+## Timed self-destruct messages (R10–R12)
+### TTL policy (authenticated)
+- `ttl_seconds` is included in the **AAD**, so the TTL cannot be modified without detection.
+- The client computes `expires_at = created_at + ttl_seconds`.
 
-### Message encryption + authentication (R8)
-- Use a well-reviewed crypto library. Do not implement primitives.
-- **AEAD**: ChaCha20-Poly1305 (preferred) or AES-256-GCM.
-- **Associated data (AD)** binds metadata so tampering is detected:
-  - `sender_uuid`, `receiver_uuid`, `conversation_id`
-  - `session_id` (e.g., hash of handshake transcript)
-  - `message_counter` (monotonic per session and direction)
-  - `ttl_seconds`, `client_sent_time`
-- **Nonce**:
-  - Must be unique per key. Recommended: derive from `message_counter` (carefully) or use 96-bit random nonces with strict de-dup in sender state.
+### Client deletion behavior
+- Expired messages are removed from:
+  - conversation views / history output
+  - local storage
+- A periodic cleanup task can sweep for expired rows.
 
-#### Encrypted message wire format (planned)
-Ciphertext is produced by AEAD over `plaintext`, with AD constructed from the fields below.
+### Server best-effort behavior
+- If the server stores offline ciphertext, it deletes it after expiry **best-effort** (TTL is also provided in server request fields to enable cleanup).
 
-```json
-{
-  "type": "E2EE_MSG",
-  "sender_uuid": "uuid-a",
-  "receiver_uuid": "uuid-b",
-  "conversation_id": "canonical(uuid-a,uuid-b)",
-  "session_id": "hex(sha256(handshake_transcript))",
-  "message_id": "uuid",
-  "message_counter": 42,
-  "ttl_seconds": 600,
-  "client_sent_time": "2026-04-07T12:00:10Z",
-  "nonce": "base64(12_bytes)",
-  "ciphertext": "base64(aead_ciphertext)",
-  "tag": "base64(aead_tag)"
-}
-```
+Limitations (explicit)
+- Self-destruct cannot prevent screenshots/copy/paste or a malicious client; this is out of scope.
 
-Recommended receiver replay window: keep the **last N counters** per session/direction (e.g., `N=2048`) and reject duplicates.
+---
 
-### Replay protection / de-duplication (R9, R22)
-- Receiver maintains per-session replay state:
-  - highest seen `message_counter` and a sliding window, or a set of recently seen counters.
-- Replayed/duplicated ciphertext is ignored.
+## Friends / contacts (R13–R16)
+- Contacts are added via **friend request → accept/decline** workflow (no instant add by default).
+- Request lifecycle:
+  - receiver: accept/decline
+  - sender: cancel
+  - both: view pending requests
+- Blocking/removing:
+  - user can remove friends and block users
+  - blocked users’ requests/messages are ignored
+- Default anti-spam:
+  - **non-friends cannot send arbitrary chat messages**
+  - only friend requests are allowed from non-friends
+  - if a user sends **10 or more friend requests within 1 minute**, the user is blocked from sending new friend requests for **30 minutes**
 
-### Timed self-destruct messages (R10–R12)
-- TTL is included in authenticated metadata (AD) so it cannot be modified undetectably.
-- **Client behavior**: delete expired messages from UI and local storage.
-- **Server behavior (best-effort)**: delete queued offline ciphertext after expiry.
-- Known limitation: cannot prevent screenshots/copy/paste or a malicious client.
+---
 
-### Delivery status semantics + metadata disclosure (R17–R19)
-- **Sent**: sender successfully submitted the ciphertext to the server.
-- **Delivered** (recommended Option B): recipient client sends an **E2EE-protected delivery receipt** back to sender (AEAD message), acknowledging message identifier(s) / counter(s).
-- **Metadata disclosure**: server learns relationship graph (who contacts whom), timing, message sizes, and online/offline patterns; E2EE does not hide this from an HbC server.
+## Message delivery status (R17–R19)
+### Delivery states
+- **Sent**: sender client successfully submitted ciphertext to the server (server accepted).
+- **Delivered**: recipient client successfully decrypted a message and sent an **E2EE-protected `RECEIPT`** back to the sender.
+- **Read**: recipient opens the active conversation and sends an E2EE `RECEIPT` carrying read semantics.
 
-#### Delivery receipt wire format (planned)
-Receipts are E2EE messages of type `E2EE_RECEIPT` encrypted under the same session keys.
+### Receipt status semantics (merged behavior)
+- Client-side status transitions are `SENT -> DELIVERED -> READ`.
+- `DELIVERED`/`READ` are derived from encrypted `RECEIPT` envelopes, not plaintext server inference.
+- WebSocket receive and offline mailbox pull share consistent receipt processing.
 
-```json
-{
-  "type": "E2EE_RECEIPT",
-  "sender_uuid": "uuid-b",
-  "receiver_uuid": "uuid-a",
-  "session_id": "hex(...)",
-  "acked_message_ids": ["uuid1", "uuid2"],
-  "acked_counters": [41, 42],
-  "client_sent_time": "2026-04-07T12:00:30Z",
-  "nonce": "base64(12_bytes)",
-  "ciphertext": "base64(...)",
-  "tag": "base64(...)"
-}
-```
+### Metadata disclosure statement
+Even with E2EE, the server can still learn:
+- timing/volume of messages (traffic analysis)
+- message sizes (unless padded)
+- social graph (who talks to whom)
+Delivery receipts can further reveal **recipient online timing** (discussed in report).
 
-## Repository implementation overview (what exists today)
-### Tech stack
-- Python + FastAPI (ASGI) + Uvicorn
-- SQLAlchemy + SQLite
-- Argon2 password hashing (`argon2-cffi`)
-- OTP (TOTP) via `pyotp`
-- JWT via `pyjwt`
-- Rate limiting via `slowapi`
+---
 
-Dependencies: `requirements.txt`
+## Offline messaging (ciphertext store-and-forward) (R20–R22)
+- If recipient is offline, server queues **ciphertext envelopes** and relays when online.
+- Retention & cleanup:
+  - ciphertext is deleted after recipient ACK / receipt flow (best-effort), or after a max age policy (e.g., 7 days)
+  - TTL expiry should be respected best-effort for queued ciphertext
+- Duplicate robustness:
+  - clients must safely handle duplicates from retries
+  - dedup/replay rules (client_msg_id + counters) prevent accepting old ciphertext as new
 
-Notes (truthful):
-- The server code imports `pyotp` for TOTP; ensure it is installed in the environment even though the current `requirements.txt` does not pin it.
-- Secrets should not be committed. If a `.env` file exists in the repo, treat it as a **local-only** file and rotate any embedded secrets before deployment.
+### Server gate consistency
+- HTTP send (`/messages/send`) and WebSocket send (`/ws/chat`) apply the same authorization gate:
+  - sender/receiver must be `FRIEND`;
+  - any `UserBlock` in either direction blocks delivery.
 
-### Server modules and code pointers
-Note: the server directory is named `Sever/` in this repository.
+---
 
-- **Entry point**: `Sever/MainServer.py`
-- **Config (.env)**: `Sever/config.py`
-- **DB schema**: `Sever/Server_db.py`
-- **DB session manager**: `Sever/SdbManager.py`
-- **Rate limiting**: `Sever/limitor.py`
-- **JWT dependency**: `Sever/Dependency.py`
-- **Routers**:
-  - Register: `Sever/routers/Register.py`
-  - Login: `Sever/routers/Login.py`
-  - Contacts: `Sever/routers/Contacts.py`
-  - Messages (offline queue + ACK): `Sever/routers/Message.py`
-  - WebSocket relay: `Sever/routers/ChatWS.py` + `Sever/ws_manager.py`
-- **TTL cleanup task**: `Sever/task.py`
+## Conversation list, unread counters, paging (R23–R25)
+- Client maintains a **conversation list** ordered by recent activity, with last message time.
+- Client maintains an **unread count** per conversation and resets it when the conversation is opened/viewed.
+- Client supports **incremental history loading** (pagination) from local storage to avoid loading all history at once.
 
-### Client stubs in this repo
-- DTOs/contracts: `Client/Schema.py`
-- Local DB tables: `Client/CLient_db.py`
-- Local DB manager: `Client/CdbManager.py`
+---
 
-## Requirements coverage (R1–R25)
-Legend: **Implemented** = exists in code now; **Partial** = some parts exist; **Planned** = design is specified here but not implemented in this repo yet.
+## Engineering requirements (security)
+- **Secure randomness**: use OS CSPRNG via crypto library.
+- **Secure local storage**:
+  - identity private keys and session state must be protected at rest (OS keychain or encrypted local storage)
+  - do not store private keys plaintext on disk
+- **Input validation**: all inbound/outbound API payloads validated; enforce size limits.
+- **Minimal sensitive logging**: do not log secrets; disable verbose debug logs by default.
+- **Rate limiting / abuse controls**: registration/login/friend requests are rate-limited (e.g., SlowAPI).
+- **Transport security**: TLS for client-server HTTP and WebSocket.
 
-### Accounts & authentication
-- **R1 Registration**
-  - **Design**: register with unique email; store password using modern password hashing; enforce basic password policy and rate limiting.
-  - **Status**: **Implemented** (server).
-  - **Pointers**: `Sever/routers/Register.py`, `Sever/Server_db.py`, `Sever/limitor.py`.
-- **R2 Login with password + OTP**
-  - **Design**: password + TOTP; issue expiring session tokens bound to user.
-  - **Status**: **Implemented** (server).
-  - **Pointers**: `Sever/routers/Login.py`, `Sever/config.py`.
-- **R3 Logout / session invalidation**
-  - **Design**: logout must promptly revoke/expire tokens.
-  - **Status**: **Partial** (token expiry exists; explicit revocation/invalidation not implemented).
-  - **Pointers**: `Sever/Dependency.py`, `Sever/config.py`.
+Notes on sensitive server-side secrets:
+- The server may need to store an OTP seed/secret to validate TOTP codes. This is **not** an E2EE secret, but it is still sensitive and must be protected (restricted access, avoid logging, and prefer encrypt-at-rest if supported by the deployment).
 
-### Identity & key management
-- **R4 Per-device identity keypair**
-  - **Design**: client generates and stores long-term identity keypair locally; server stores only public key(s) for initiation.
-  - **Status**: **Partial** (server stores `device_public_key` at login; client key generation/storage not implemented).
-  - **Pointers**: `Sever/routers/Login.py`, `Sever/Server_db.py`, `Client/CLient_db.py`.
-- **R5 Fingerprint / verification UI**
-  - **Design**: display fingerprint/safety number; user can mark as verified (local-only is acceptable).
-  - **Status**: **Planned**.
-- **R6 Key change detection**
-  - **Design**: warn on key change; block sending until re-verified.
-  - **Status**: **Planned**.
+---
 
-### E2EE 1:1 messaging
-- **R7 Secure session establishment**
-  - **Design**: signed ephemeral ECDH handshake (above).
-  - **Status**: **Planned**.
-- **R8 Message encryption + authentication**
-  - **Design**: AEAD with AD binding critical metadata.
-  - **Status**: **Planned** (server currently accepts opaque `ciphertext`).
-- **R9 Replay protection / de-duplication**
-  - **Design**: counters + replay window (above).
-  - **Status**: **Planned**.
+## Roadmap / module checklist (tracked against spec)
+- [x] **1. Register & Login (R1–R3)** — implemented
+  - [x] implemented: register with email/username, store Argon2-hashed password
+  - [x] implemented: login with password + TOTP
+  - [x] implemented: session token expiry + logout/session invalidation (`POST /api/v1/logout` revokes current token, `POST /api/v1/logout-all` invalidates older sessions via user cutoff timestamp)
+- [x] **2. Identity key management (R4–R6)** — implemented
+  - [x] implemented: per-device identity keypair stored locally (encrypted with a KEK derived from login password)
+  - [x] implemented: server stores device public keys
+  - [x] implemented: fingerprint display + verified flag (`sync-contact-keys`, `show-fingerprints`, `verify-device`)
+  - [x] implemented: key change detection (warn + re-verify policy, with persistent unverified state until user verifies)
+- [x] **3. E2EE messaging (R7–R9)** — implemented
+  - [x] implemented: session establishment via X25519 + HKDF-SHA256 (`derive_session_key` with protocol/device/user context binding)
+  - [x] implemented: per-message AEAD (AES-256-GCM) with canonical JSON AAD over routing/message metadata
+  - [x] implemented: replay/dedup via `client_msg_id` seen-set + per-sender-device inbound counter checks
+  - [x] note: current counter policy is strict monotonic (`incoming_counter > latest_seen`) and does not yet implement an out-of-order acceptance window
+- [x] **4. Contact management (R13–R16)** — implemented
+  - [x] implemented: request/accept/decline; block/unblock
+  - [x] implemented: default anti-spam: non-friends cannot message
+  - [x] implemented: friend-request spam control (`>=10 / 1 minute` triggers `30 minutes` cooldown)
+- [x] **5. Offline messages (R20–R22)** — implemented
+  - [x] implemented: ciphertext queue store-and-forward
+  - [x] implemented: ACK/cleanup policy (ack delete + periodic expiry cleanup)
+- [x] **6. Timed self-destruct (R10–R12)** — implemented
+  - [x] implemented: TTL is authenticated in AAD, and client performs local expiry cleanup before pull/history/conversations views
+  - [x] implemented: server best-effort expiry cleanup for queued ciphertext
+- [x] **7. Conversation list/unread/paging (R23–R25)** — implemented
+  - [x] implemented: `conversations` command ordered by `last_activity` and showing unread counters
+  - [x] implemented: `history <contact_uuid> --limit N --before <rfc3339>` incremental local pagination
+- [x] **8. Delivery receipts semantics (R17–R19)** — implemented
+  - [x] implemented: Delivered is defined by E2EE `RECEIPT` (recipient decrypts CHAT then sends encrypted receipt back)
 
-### Timed self-destruct messages
-- **R10 TTL / expiration policy**
-  - **Design**: TTL included in authenticated metadata; server best-effort enforces TTL for offline ciphertext.
-  - **Status**: **Partial** (server stores TTL and cleans expired offline messages; client-authenticated TTL not implemented).
-  - **Pointers**: `Sever/Schema.py`, `Sever/Server_db.py`, `Sever/task.py`.
-- **R11 Client deletion behavior**
-  - **Design**: delete from UI and local storage after expiry.
-  - **Status**: **Planned**.
-- **R12 Server storage behavior (best-effort)**
-  - **Design**: delete queued ciphertext after expiry.
-  - **Status**: **Implemented** (best-effort cleanup loop).
-  - **Pointers**: `Sever/task.py`.
+---
 
-### Friends / contacts
-- **R13 Friend request workflow**
-  - **Design**: request → accept/decline (not instant add), request by email.
-  - **Status**: **Implemented**.
-  - **Pointers**: `Sever/routers/Contacts.py`.
-- **R14 Request lifecycle**
-  - **Design**: accept/decline; sender cancel; both can view pending.
-  - **Status**: **Implemented**.
-  - **Pointers**: `Sever/routers/Contacts.py`.
-- **R15 Blocking / removing**
-  - **Design**: block users; blocked users’ requests/messages are ignored.
-  - **Status**: **Partial** (blocking exists; explicit “remove friend” is not implemented as a dedicated endpoint).
-  - **Pointers**: `Sever/routers/Contacts.py`, `Sever/routers/Message.py`, `Sever/routers/ChatWS.py`.
-- **R16 Default anti-spam control**
-  - **Design**: non-friends cannot send arbitrary chat messages; only friend requests.
-  - **Status**: **Implemented** (server drops/fakes response for blocked/non-friends).
-  - **Pointers**: `Sever/routers/Message.py`.
+## Data model (design sketch)
+This section describes **intended** storage (server stores ciphertext; client stores local state). Final schema may evolve; security constraints above are normative.
 
-### Message delivery status
-- **R17 Minimum delivery states**
-  - **Design**: Sent + Delivered.
-  - **Status**: **Partial** (current API uses `UNRECEIVED`; full Sent/Delivered semantics not implemented).
-  - **Pointers**: `Sever/Schema.py`, `Sever/routers/Message.py`.
-- **R18 Define “Delivered” semantics**
-  - **Design**: Option B delivery receipt (E2EE-protected) from recipient to sender.
-  - **Status**: **Planned**.
-- **R19 Metadata disclosure statement**
-  - **Design**: stated above; server learns timing/graph/size metadata.
-  - **Status**: **Specified** (design-level requirement).
+### Server-side storage (conceptual)
+Table `User`:
+- `uuid` (PK)
+- `email` (unique)
+- `user_name`
+- `password_hash`
+- `otp_secret` (or equivalent; protect appropriately)
 
-### Offline messaging (ciphertext store-and-forward)
-- **R20 Offline ciphertext queue**
-  - **Design**: if recipient offline, queue ciphertext and relay when online.
-  - **Status**: **Implemented**.
-  - **Pointers**: `Sever/routers/Message.py`, `Sever/routers/ChatWS.py`.
-- **R21 Retention and cleanup**
-  - **Design**: delete after ACK or after max age; respect TTL best-effort for queued ciphertext.
-  - **Status**: **Implemented** (ACK delete + TTL cleanup).
-  - **Pointers**: `Sever/routers/Message.py`, `Sever/task.py`.
-- **R22 Duplicate/replay robustness**
-  - **Design**: client-side replay protection; safe handling of duplicates from retries.
-  - **Status**: **Partial** (server supports ACK delete by IDs; client replay protection planned).
+Table `Device`:
+- `device_id` (PK)
+- `user_uuid` (FK)
+- `device_hash`
+- `device_public_key`
 
-### Conversation list & unread counters
-- **R23 Conversation list**
-  - **Design**: client shows conversation list ordered by most recent activity.
-  - **Status**: **Planned** (client tables exist).
-  - **Pointers**: `Client/CLient_db.py`.
-- **R24 Unread counters**
-  - **Design**: maintain unread count per conversation and update on open/read.
-  - **Status**: **Planned**.
-  - **Pointers**: `Client/CLient_db.py`.
-- **R25 Paging / incremental loading**
-  - **Design**: incremental load from local DB; extend server APIs with paging if needed.
-  - **Status**: **Planned**.
+Table `Friendship`:
+- `relation_id` (PK)
+- `user_id_a` (FK)
+- `user_id_b` (FK)
+- `status` (pending/accepted/blocked/etc.)
 
-## Security engineering requirements (non-functional)
-### Transport security (TLS) — required
-- **Requirement**: all client-server connections must use **TLS** (protect against network attackers and credential theft).
-- **Status**: **Not configured in code** (Uvicorn runs without TLS; WebSocket is `ws://` not `wss://`).
-- **Deployment options**:
-  - **Reverse proxy TLS termination (recommended)**: Nginx/Caddy terminates TLS and proxies to the FastAPI server.
-  - **Uvicorn TLS**: start Uvicorn with `--ssl-keyfile` and `--ssl-certfile`.
+Table `FriendRequest`:
+- `request_id` (PK)
+- `sender_uuid` (FK)
+- `receiver_uuid` (FK)
+- `status`
+- `expires_at`
 
-### Secure randomness
-- Keys and nonces must come from a cryptographically secure RNG (library/OS-provided).
+Table `OfflineMessage`:
+- `message_id` (PK)
+- `sender_uuid` (FK)
+- `receiver_uuid` (FK)
+- `ciphertext_envelope`
+- `expires_at`
 
-### Secure local storage (client)
-- Private keys and protocol state must be protected at rest (OS keychain or encrypted local DB). **Planned**.
+### Client-side storage (conceptual)
+Table `LocalIdentity`:
+- `user_uuid` (PK)
+- `public_key`
+- `private_key_encrypted`
 
-### Input validation and size limits
-- Server uses Pydantic schemas to validate structure and basic types.
-- **Planned**: enforce explicit maximum sizes (e.g., ciphertext length limits) and reject oversized payloads.
+Table `Conversation`:
+- `contact_uuid` (PK)
+- `contact_name`
+- `unread_count`
+- `last_activity`
 
-### Minimal sensitive logging
-- Do not log secrets (passwords, OTP seeds, JWTs, private keys, decrypted plaintext).
-- Keep debug logs off by default in production deployments.
+Table `ContactDevice`:
+- `contact_device_id` (PK)
+- `contact_uuid` (FK)
+- `public_key`
+- `fingerprint`
+- `is_verified`
+- `last_seen_key_hash`
 
-### Basic abuse controls
-- Rate limiting exists for register/login.
-- **Planned**: add rate limiting for friend requests and message send endpoints.
+Table `Message`:
+- `client_msg_id` (PK)
+- `conversation_id` (FK)
+- `direction` (INBOUND/OUTBOUND)
+- `status` (SENT/DELIVERED/READ)
+- `message_type` (CHAT/RECEIPT)
+- `created_at`
+- `expires_at`
+- `plaintext_local` (optional; if stored, must be protected at rest)
 
-## Deployment and usage (step-by-step)
-This guide is intentionally minimal but complete. It avoids assuming pre-installed third-party libraries beyond Python itself.
+Table `SeenMessage` (dedup):
+- `client_msg_id`
+- `conversation_id`
+- `received_at`
 
-### Ubuntu / WSL (Linux)
-1. Install Python 3.11+ and pip.
-2. (Recommended) Create and activate a virtual environment.
-3. From repo root, install dependencies:
-   - `pip install -r requirements.txt`
-4. Create `Sever/.env` (do not commit secrets):
-   - `JWT_SECRET_KEY=<random_secret>`
-   - `JWT_ALGORITHM=HS256`
-   - `ACCESS_TOKEN_EXPIRE_DAYS=7`
-5. Start server:
-   - `python Sever/MainServer.py`
-6. Verify health:
-   - `GET /` should return a JSON status message.
-7. Open Swagger docs:
-   - `/docs`
+---
 
-### Windows 11
-1. Install Python 3.11+.
-2. In PowerShell at repo root:
-   - `pip install -r requirements.txt`
-3. Create `Sever\\.env` (same variables as above).
-4. Run:
-   - `python Sever\\MainServer.py`
+## Deployment & usage
 
-### Database initialization
-- The server uses SQLite. Tables are created automatically on startup by SQLAlchemy.
-- Default server DB file: `sdb.db` (created in the working directory where the server starts).
+Use the full step-by-step setup and demo guide here:
+- [deploy_and_use_guide.md](deploy_and_use_guide.md)
 
-### TLS deployment (required)
-E2EE does not replace TLS. Deploy with TLS using either:
-- **Reverse proxy (recommended)**: terminate TLS at Nginx/Caddy and proxy to the FastAPI server on `127.0.0.1:8000`.
-- **Direct Uvicorn TLS**: start Uvicorn with certificate and key files.
+That document covers:
+- virtual environment setup
+- dependency installation
+- local TLS certificate generation with `mkcert`
+- `.env` configuration
+- server startup
+- client profile setup
+- registration, login, OTP, contacts, fingerprints, chat, pull, history, and demo flow
 
-### WebSocket usage (current server)
-- Endpoint: `/ws/chat?token=<JWT>`
-- Client sends JSON:
-  - `{ "receiver_uuid": "...", "ciphertext": "...", "expire_duration": 86400 }`
-- Server forwards JSON:
-  - `{ "type": "NEW_MESSAGE", "sender_uuid": "...", "ciphertext": "...", "timestamp": "..." }`
+Additional quick demo notes remain in:
+- [what_to_test.md](Client/ReadMe/what_to_test.md)
 
-### HTTP API quickstart (current server)
-All HTTP endpoints are under `/api/v1` and require `Authorization: Bearer <JWT>` unless noted.
+### TLS runtime requirements
+- Server requires both `TLS_CERT_FILE` and `TLS_KEY_FILE` to start in secure mode.
+- Client transport schemes are enforced as secure:
+  - `CLIENT_SERVER_BASE_URL` must be `https://...`
+  - `CLIENT_WEBSOCKET_URL` must be `wss://...`
+- For local CA certificates (for example `mkcert`), configure Python trust (for example via `SSL_CERT_FILE`) so TLS verification succeeds.
 
-- **Register** (no auth): `POST /api/v1/register`
-- **Login** (no auth): `POST /api/v1/login`
-- **Friend request**: `POST /api/v1/friends/request`
-- **Pending requests**: `GET /api/v1/friends/pending`
-- **Accept/reject**: `POST /api/v1/friends/action`
-- **Cancel sent request**: `DELETE /api/v1/friends/request/{request_id}`
-- **Friend list**: `GET /api/v1/friends`
-- **Block**: `POST /api/v1/friends/block`
-- **Fetch contact keys**: `GET /api/v1/friends/{contact_uuid}/keys`
-- **Send ciphertext (HTTP)**: `POST /api/v1/messages/send`
-- **Pull offline ciphertext**: `GET /api/v1/messages/offline`
-- **ACK delete**: `POST /api/v1/messages/ack`
+---
 
-## Testing & evaluation (what to demonstrate)
-### Demonstration checklist
-- Register + TOTP enrollment, login, JWT-protected endpoints.
-- Friend request workflow (request, pending, accept/reject, cancel).
-- Offline messaging: send while recipient offline, pull, ACK delete.
-- TTL cleanup: expired offline messages removed (best-effort).
+## Requirements mapping (R1–R25)
+This section maps the spec requirements to the README’s design sections (and acts as a checklist for implementation completion).
 
-### Security test cases (minimum 2)
-- **Replay test (planned client)**: resend a previously accepted ciphertext/counter; receiver must drop it.
-- **Key change visibility test (planned client)**: rotate a contact’s identity key; client must warn and enforce the chosen policy.
-
-## Limitations and future work (truthful)
-- The E2EE protocol, replay protection, delivery receipts, key verification UI/state, and conversation list/unread/paging are **specified in this README but not implemented** in `Client/` yet.
-- TLS must be added at deployment time to satisfy the project requirement.
-- Server-side token revocation/invalidation on logout is not implemented (expiry exists).
+- **R1–R3 Accounts & authentication**: “Cryptography choices”, “Engineering requirements”, “Roadmap / module checklist”.
+- **R4–R6 Identity & key management**: “Identity & key management”.
+- **R7–R9 E2EE messaging**: “Secure session establishment”, “E2EE message format…”.
+- **R10–R12 Self-destruct**: “Timed self-destruct messages”.
+- **R13–R16 Friends/contacts**: “Friends / contacts”.
+- **R17–R19 Delivery status**: “Message delivery status”.
+- **R20–R22 Offline messaging**: “Offline messaging”.
+- **R23–R25 Conversations/unread/paging**: “Conversation list, unread counters, paging”.

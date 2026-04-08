@@ -7,3 +7,10 @@ pydantic-settings
 uvicorn
 email-validator
 slowapi
+pyotp
+httpx
+websockets
+cryptography
+typer
+qrcode
+pytest

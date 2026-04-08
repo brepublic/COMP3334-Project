@@ -16,22 +16,22 @@ ph = PasswordHasher() #
 
 @router.post("/register", response_model=RegisterResponse)
 @limiter.limit("3/day")
-def register_user(request: RegisterRequest, db=Depends(get_db)):
+def register_user(request: Request, payload: RegisterRequest, db=Depends(get_db)):
     """New user register -> hash pw -> generate OTP -> store in db"""
-    existing_user = db.query(User).filter(User.email == request.email).first()
+    existing_user = db.query(User).filter(User.email == payload.email).first()
     if existing_user:
         raise HTTPException(status_code=400, detail="Email already registered")
 
     # hash
-    hashed_password = ph.hash(request.password)
+    hashed_password = ph.hash(payload.password)
 
     # generate OTP
     otp_secret = pyotp.random_base32()
 
     # Create new entry
     new_user = User(
-        email=request.email,
-        user_name=request.user_name,
+        email=payload.email,
+        user_name=payload.user_name,
         password_hash=hashed_password,
         otp_secret=otp_secret  
     )

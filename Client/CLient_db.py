@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import create_engine, Column, String, Integer, ForeignKey, Boolean, DateTime
+from sqlalchemy import Column, String, Integer, ForeignKey, Boolean, DateTime, Index
 from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
@@ -14,7 +14,12 @@ class LocalIdentity(Base):
     
     uuid = Column(String, primary_key=True, default=generate_uuid)
     public_key = Column(String, nullable=False)
-    private_key = Column(String, nullable=False)
+    private_key = Column(String, nullable=True)
+    private_key_encrypted = Column(String, nullable=True)
+    private_key_salt = Column(String, nullable=True)
+    private_key_kdf = Column(String, nullable=True)
+    private_key_kdf_params = Column(String, nullable=True)
+    private_key_nonce = Column(String, nullable=True)
 
 
 #---------------------------Conversation---------------------------------------------
@@ -24,6 +29,7 @@ class Conversation(Base):
     contact_uuid = Column(String, primary_key=True)
     contact_name = Column(String, nullable=False)
     unread_threads = Column(Integer, default=0)
+    last_activity = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     # Delete related device is the contact is deleted
     devices = relationship("ContactDevice", back_populates="conversation", cascade="all, delete-orphan")
@@ -36,6 +42,8 @@ class ContactDevice(Base):
     contact_device_id = Column(String, primary_key=True, default=generate_uuid)
     contact_uuid = Column(String, ForeignKey('conversations.contact_uuid'), nullable=False)
     public_key = Column(String, nullable=False)
+    fingerprint = Column(String, nullable=True)
+    last_seen_key_hash = Column(String, nullable=True)
     is_verified = Column(Boolean, default=False)
 
     conversation = relationship("Conversation", back_populates="devices")
@@ -50,8 +58,35 @@ class Message(Base):
     receiver_id = Column(String, nullable=False)
     
     content_plaintext = Column(String, nullable=False)
-    
+    client_msg_id = Column(String, nullable=True, index=True)
+    message_type = Column(String, nullable=False, default="CHAT")
+    status = Column(String, nullable=False, default="SENT")
+    ack_client_msg_id = Column(String, nullable=True)
     expire_duration = Column(Integer, nullable=False)
     receive_at = Column(DateTime, default=lambda: datetime.now(timezone.utc)) 
+    expires_at = Column(DateTime, nullable=True)
 
     conversation = relationship("Conversation", back_populates="messages")
+
+
+Index("ix_messages_conversation_receive_at", Message.conversation_id, Message.receive_at.desc())
+
+
+class SeenMessage(Base):
+    __tablename__ = "seen_messages"
+
+    client_msg_id = Column(String, primary_key=True)
+    conversation_id = Column(String, ForeignKey("conversations.contact_uuid"), nullable=False)
+    sender_device_id = Column(String, nullable=False)
+    received_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class MessageCounter(Base):
+    __tablename__ = "message_counters"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    conversation_id = Column(String, ForeignKey("conversations.contact_uuid"), nullable=False)
+    peer_device_id = Column(String, nullable=False)
+    direction = Column(String, nullable=False)  # OUTBOUND / INBOUND
+    counter_value = Column(Integer, nullable=False, default=0)
+    recent_counters = Column(String, nullable=True)

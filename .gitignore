@@ -9,3 +9,18 @@ __pycache__/
 
 # test files
 test_dbs.py
+
+# .venv
+.venv/
+.env
+
+# backup files
+*.bak
+
+certs/*.key
+certs/*.pem
+certs/*.crt
+.cursor/*
+*.json
+*.log
+.cursor
