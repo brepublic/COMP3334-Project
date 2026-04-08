@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     SERVER_DB_PATH: Path = Path("sdb.db")
     SERVER_HOST: str = "127.0.0.1"
     SERVER_PORT: int = 8000
+    SERVER_RELOAD: bool = False
     TLS_CERT_FILE: Path | None = None
     TLS_KEY_FILE: Path | None = None
     ALLOW_INSECURE_TEST_MODE: bool = False

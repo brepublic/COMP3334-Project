@@ -1,3 +1,4 @@
+import asyncio
 import re
 import time
 
@@ -104,6 +105,66 @@ def test_client_non_message_command_works_without_in_memory_session_password(cli
     add_result = client_harness.run(alice_env, ["add-friend", "bob@example.com"])
     assert add_result.exit_code == 0, add_result.output
     assert "Successfully" in add_result.output
+
+
+def test_chat_rejects_wrong_password_before_entering_session(client_harness):
+    # Verifies chat refuses entry when the local identity key cannot be unlocked.
+    # Expected result: the command exits immediately with a password error and never enters the chat loop.
+    setup = setup_two_clients_and_friendship(client_harness)
+
+    chat_result = client_harness.run(
+        setup["alice_env"],
+        ["chat", "bob"],
+        input_text="WrongPassword123\n",
+    )
+    assert chat_result.exit_code != 0, chat_result.output
+    assert "Incorrect password for local identity key." in chat_result.output
+    assert "Entering chat with" not in chat_result.output
+
+
+def test_auto_receiver_keeps_single_websocket_on_idle_timeout(client_harness, monkeypatch):
+    # Verifies the auto-receiver does not reconnect endlessly when the websocket is simply idle.
+    # Expected result: idle recv timeouts reuse one socket and close it cleanly when stopping.
+    client_main = client_harness.client_main
+    connect_calls = 0
+    close_calls = 0
+
+    class FakeWebSocket:
+        def __init__(self):
+            self.recv_calls = 0
+
+        async def recv(self):
+            self.recv_calls += 1
+            if self.recv_calls >= 2:
+                client_main._AUTO_RECEIVER_STOP.set()
+            raise asyncio.TimeoutError()
+
+        async def close(self):
+            nonlocal close_calls
+            close_calls += 1
+
+    async def fake_connect_chat_socket(websocket_url: str, token: str):
+        nonlocal connect_calls
+        connect_calls += 1
+        return FakeWebSocket()
+
+    monkeypatch.setattr(client_main, "connect_chat_socket", fake_connect_chat_socket)
+    monkeypatch.setattr(client_main, "_process_incoming_messages", lambda *args, **kwargs: 0)
+
+    runtime = client_main.ClientRuntime(
+        settings=type("Settings", (), {"websocket_url": "wss://testserver/ws/chat"})(),
+        state=type("State", (), {"access_token": "token"})(),
+        db_manager=None,
+    )
+
+    client_main._AUTO_RECEIVER_STOP.clear()
+    try:
+        asyncio.run(client_main._auto_receiver_ws_loop(runtime, identity=object()))
+    finally:
+        client_main._AUTO_RECEIVER_STOP.clear()
+
+    assert connect_calls == 1
+    assert close_calls == 1
 
 
 def test_client_send_pull_receipt_and_history(client_harness):

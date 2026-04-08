@@ -225,6 +225,12 @@ After login, the client stores:
 - local device ID
 - local encrypted identity private key
 
+To log out the current session later:
+
+```bash
+python -m Client.main logout
+```
+
 ## 12. Add A Friend
 
 From Alice's terminal:
@@ -232,6 +238,8 @@ From Alice's terminal:
 ```bash
 python -m Client.main add-friend bob@example.com
 ```
+
+If you two are already friend, you will have an error message.
 
 From Bob's terminal, list incoming requests:
 
@@ -286,6 +294,7 @@ python -m Client.main chat bob
 ```
 
 Inside chat:
+- You will first enter your account password
 - typing plain text sends a normal message
 - `/ttl <seconds> <message>` sends a timed self-destruct message
 - `/refresh` reloads recent local chat history

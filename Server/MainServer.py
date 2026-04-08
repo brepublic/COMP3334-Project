@@ -100,7 +100,7 @@ if __name__ == "__main__":
         "MainServer:app",
         host=settings.SERVER_HOST,
         port=settings.SERVER_PORT,
-        reload=True,
+        reload=settings.SERVER_RELOAD,
         ssl_certfile=ssl_certfile,
         ssl_keyfile=ssl_keyfile,
         ssl_version=ssl.PROTOCOL_TLS_SERVER if ssl_certfile and ssl_keyfile else None,

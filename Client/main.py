@@ -18,7 +18,6 @@ import readline
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from qrcode import QRCode
 from sqlalchemy import select
-from sqlalchemy.orm import object_session
 
 if __package__:
     from .api import ChatClientAPI, ClientAPIError
@@ -86,8 +85,6 @@ RECEIPT_STATUS_READ = "READ"
 MESSAGE_STATUS_SENT = "SENT"
 MESSAGE_STATUS_DELIVERED = "DELIVERED"
 MESSAGE_STATUS_READ = "READ"
-DEBUG_LOG_PATH = os.getenv("CLIENT_DEBUG_LOG_PATH")
-DEBUG_SESSION_ID = os.getenv("CLIENT_DEBUG_SESSION_ID", "default")
 AUTO_PULL_INTERVAL_SECONDS = 3
 AUTO_PULL_BACKOFF_MAX_SECONDS = 30
 AUTO_PULL_WHEN_WS_HEALTHY_SECONDS = 5
@@ -100,27 +97,6 @@ _ACTIVE_CHAT_PROMPT: str | None = None
 _ACTIVE_CHAT_CONTACT_UUID: str | None = None
 _ASYNC_PRINT_LOCK = threading.Lock()
 _SESSION_PASSWORD: str | None = None
-
-
-def _debug_log(run_id: str, hypothesis_id: str, location: str, message: str, data: dict) -> None:
-    if not DEBUG_LOG_PATH:
-        return
-    # region agent log
-    payload = {
-        "sessionId": DEBUG_SESSION_ID,
-        "runId": run_id,
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
-    }
-    try:
-        with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as fp:
-            fp.write(json.dumps(payload, ensure_ascii=True) + "\n")
-    except Exception:
-        pass
-    # endregion
 
 
 def _dispatch_cli_command(args: list[str]) -> None:
@@ -138,7 +114,12 @@ def _run_interactive_shell() -> None:
             runtime = build_runtime()
             _start_auto_receiver_if_possible(runtime)
             prompt_user = runtime.state.user_name or "guest"
-            raw = input(f"{prompt_user}@client> ").strip()
+            prompt_color = typer.colors.RED if prompt_user == "guest" else typer.colors.GREEN
+            prompt = (
+                typer.style(prompt_user, fg=prompt_color)
+                + typer.style("@client> ", fg=typer.colors.WHITE)
+            )
+            raw = input(prompt).strip()
         except EOFError:
             typer.echo()
             typer.echo("Exiting interactive mode.")
@@ -192,9 +173,14 @@ def build_runtime() -> ClientRuntime:
 
 
 def build_api(runtime: ClientRuntime) -> ChatClientAPI:
+    def _handle_invalid_token() -> None:
+        runtime.state.clear_auth()
+        runtime.state.save(runtime.settings.state_path, runtime.settings.state_key_path)
+
     return ChatClientAPI(
         base_url=runtime.settings.server_base_url,
         access_token=runtime.state.access_token,
+        on_invalid_token=_handle_invalid_token,
     )
 
 
@@ -240,6 +226,13 @@ def _remember_session_password(password: str) -> None:
     global _SESSION_PASSWORD
     if password:
         _SESSION_PASSWORD = password
+
+
+def _unlock_local_identity(runtime: ClientRuntime, password: str):
+    try:
+        return ensure_local_identity(runtime.db_manager, password)
+    except Exception as exc:
+        raise typer.BadParameter("Incorrect password for local identity key.") from exc
 
 
 def _print_columns(headers: list[str], rows: list[list[str]]) -> None:
@@ -405,17 +398,6 @@ def _sync_contact_keys(runtime: ClientRuntime, contact_uuid: str) -> ContactKeyS
             ContactDevice.contact_uuid == contact_uuid,
             ContactDevice.contact_device_id.not_in(active_device_ids),
         ).delete(synchronize_session=False)
-        _debug_log(
-            "post-fix",
-            "H10",
-            "Client/main.py:_sync_contact_keys:active-set",
-            "Synced and pruned contact device cache by server active devices",
-            {
-                "contact_uuid": contact_uuid,
-                "active_device_ids": sorted(active_device_ids),
-                "active_count": len(active_device_ids),
-            },
-        )
 
     return ContactKeySyncResult(
         changed_devices=changed_devices,
@@ -963,44 +945,50 @@ async def _auto_receiver_ws_loop(runtime: ClientRuntime, identity) -> None:
     backoff = 1
     last_pull_at = 0.0
     while not _AUTO_RECEIVER_STOP.is_set():
+        websocket = None
         try:
             websocket = await connect_chat_socket(runtime.settings.websocket_url, runtime.state.access_token)
             backoff = 1
-            async with websocket:
-                while not _AUTO_RECEIVER_STOP.is_set():
-                    try:
-                        raw = await asyncio.wait_for(websocket.recv(), timeout=1.0)
-                    except asyncio.TimeoutError:
-                        # Idle polling timeout; keep current websocket instead of reconnecting.
-                        continue
-                    if isinstance(raw, bytes):
-                        raw = raw.decode("utf-8")
-                    payload = json.loads(raw)
-                    if payload.get("type") != "NEW_MESSAGE":
-                        if time.monotonic() - last_pull_at >= AUTO_PULL_WHEN_WS_HEALTHY_SECONDS:
-                            try:
-                                _pull_once(runtime, identity, ack=True, output=True)
-                            except Exception:
-                                pass
-                            last_pull_at = time.monotonic()
-                        continue
-                    incoming = [
-                        IncomingMessageItem(
-                            message_id=str(payload.get("message_id", str(uuid.uuid4()))),
-                            sender_uuid=payload.get("sender_uuid"),
-                            ciphertext=str(payload.get("ciphertext", "")),
-                        )
-                    ]
-                    _process_incoming_messages(runtime, identity, incoming, output=True, acknowledge=False)
+            while not _AUTO_RECEIVER_STOP.is_set():
+                try:
+                    raw = await asyncio.wait_for(websocket.recv(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    # Idle timeout is normal; keep the current socket open and continue waiting.
+                    continue
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8")
+                payload = json.loads(raw)
+                if payload.get("type") != "NEW_MESSAGE":
                     if time.monotonic() - last_pull_at >= AUTO_PULL_WHEN_WS_HEALTHY_SECONDS:
                         try:
                             _pull_once(runtime, identity, ack=True, output=True)
                         except Exception:
                             pass
                         last_pull_at = time.monotonic()
+                    continue
+                incoming = [
+                    IncomingMessageItem(
+                        message_id=str(payload.get("message_id", str(uuid.uuid4()))),
+                        sender_uuid=payload.get("sender_uuid"),
+                        ciphertext=str(payload.get("ciphertext", "")),
+                    )
+                ]
+                _process_incoming_messages(runtime, identity, incoming, output=True, acknowledge=False)
+                if time.monotonic() - last_pull_at >= AUTO_PULL_WHEN_WS_HEALTHY_SECONDS:
+                    try:
+                        _pull_once(runtime, identity, ack=True, output=True)
+                    except Exception:
+                        pass
+                    last_pull_at = time.monotonic()
         except Exception:
             await asyncio.sleep(min(backoff, AUTO_PULL_BACKOFF_MAX_SECONDS))
             backoff = min(backoff * 2, AUTO_PULL_BACKOFF_MAX_SECONDS)
+        finally:
+            if websocket is not None:
+                try:
+                    await websocket.close()
+                except Exception:
+                    pass
 
 
 def _auto_receiver_worker() -> None:
@@ -1132,16 +1120,6 @@ def login(
         user_name=response.user_name,
         access_token=response.access_token,
         token_type=response.token_type,
-    )
-    _debug_log(
-        "post-fix",
-        "H6",
-        "Client/main.py:login:state",
-        "Login persisted auth and local device id",
-        {
-            "user_uuid": response.user_uuid,
-            "local_device_id": runtime.state.local_device_id,
-        },
     )
     runtime.state.save(runtime.settings.state_path, runtime.settings.state_key_path)
 
@@ -1363,7 +1341,7 @@ def _show_recent_chat(runtime: ClientRuntime, contact_uuid: str, limit: int = 12
 def _send_chat_payload(runtime: ClientRuntime, receiver_uuid: str, message: str, ttl: int, password: str) -> None:
     if not runtime.state.user_uuid:
         raise typer.BadParameter("No saved user UUID found. Run login first.")
-    identity = ensure_local_identity(runtime.db_manager, password)
+    identity = _unlock_local_identity(runtime, password)
     _ensure_conversation_exists(runtime.db_manager, receiver_uuid)
     sync_result = _sync_contact_keys(runtime, receiver_uuid)
     _warn_changed_devices(receiver_uuid, sync_result.changed_devices)
@@ -1478,6 +1456,7 @@ def chat(
     _cleanup_expired_local_messages(runtime.db_manager)
     _touch_conversation(runtime.db_manager, selected.uuid, contact_name=selected.user_name, clear_unread=True)
     password = typer.prompt("Password", hide_input=True)
+    _unlock_local_identity(runtime, password)
     _remember_session_password(password)
     identity = ensure_local_identity(runtime.db_manager, password)
     _start_auto_receiver_if_possible(runtime)
@@ -1548,7 +1527,7 @@ def pull(
     _start_auto_receiver_if_possible(runtime)
     if not runtime.state.user_uuid:
         raise typer.BadParameter("No saved user UUID found. Run login first.")
-    identity = ensure_local_identity(runtime.db_manager, password)
+    identity = _unlock_local_identity(runtime, password)
     _remember_session_password(password)
     _start_auto_receiver_if_possible(runtime)
     _refresh_mailbox(runtime, identity, ack=ack, output=True)
@@ -1701,44 +1680,13 @@ def conversations():
         rows = db.execute(
             select(Conversation).order_by(Conversation.last_activity.desc())
         ).scalars().all()
-        _debug_log(
-            "pre-fix",
-            "H1",
-            "Client/main.py:conversations:query",
-            "Fetched conversation rows in active session",
-            {
-                "rows_count": len(rows),
-                "db_expire_on_commit": bool(getattr(db, "expire_on_commit", False)),
-                "first_row_bound_before_close": object_session(rows[0]) is not None if rows else False,
-            },
-        )
-    _debug_log(
-        "pre-fix",
-        "H1",
-        "Client/main.py:conversations:after-session-close",
-        "Conversation rows state after session context",
-        {
-            "rows_count": len(rows),
-            "first_row_bound_after_close": object_session(rows[0]) is not None if rows else False,
-        },
-    )
     if not rows:
         typer.echo("No local conversations.")
         return
     output_rows: list[list[str]] = []
     for row in rows:
-        try:
-            ts = row.last_activity.isoformat() if row.last_activity else "-"
-            output_rows.append([row.contact_uuid, row.contact_name, str(row.unread_threads), ts])
-        except Exception as exc:
-            _debug_log(
-                "pre-fix",
-                "H1",
-                "Client/main.py:conversations:row-access-error",
-                "Conversation row attribute access failed",
-                {"error": str(exc)},
-            )
-            raise
+        ts = row.last_activity.isoformat() if row.last_activity else "-"
+        output_rows.append([row.contact_uuid, row.contact_name, str(row.unread_threads), ts])
     _print_columns(["ContactUUID", "ContactName", "Unread", "LastActivity"], output_rows)
 
 
