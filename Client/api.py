@@ -1,4 +1,4 @@
-from typing import List
+from typing import Callable, List
 
 import httpx
 from pydantic import TypeAdapter
@@ -48,9 +48,15 @@ class ClientAPIError(RuntimeError):
 
 
 class ChatClientAPI:
-    def __init__(self, base_url: str, access_token: str | None = None):
+    def __init__(
+        self,
+        base_url: str,
+        access_token: str | None = None,
+        on_invalid_token: Callable[[], None] | None = None,
+    ):
         self._client = httpx.Client(base_url=base_url.rstrip("/"), timeout=10.0)
         self._access_token = access_token
+        self._on_invalid_token = on_invalid_token
 
     def close(self) -> None:
         self._client.close()
@@ -82,6 +88,8 @@ class ChatClientAPI:
                 detail = payload.get("detail", payload)
             except ValueError:
                 detail = response.text
+            if response.status_code == 401 and str(detail) == "Invalid Token" and self._on_invalid_token:
+                self._on_invalid_token()
             raise ClientAPIError(
                 f"{response.status_code} {response.reason_phrase} for "
                 f"{response.request.method} {response.request.url}: {detail}"
