@@ -21,3 +21,6 @@ certs/*.key
 certs/*.pem
 certs/*.crt
 .cursor/*
+*.json
+*.log
+.cursor

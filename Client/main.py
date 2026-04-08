@@ -932,26 +932,8 @@ def _process_incoming_messages(
                     status=receipt_status,
                     ack_client_msg_id=ack_client_msg_id,
                 )
-                # READ回执静默处理，只更新状态不打印；其他回执按需打印
-                if output and receipt_status != RECEIPT_STATUS_READ:
-                    if updated:
-                        _emit_async_table(
-                            ["Time", "Dir", "Status", "TTL", "Message"],
-                            [[created_at_dt.isoformat(), "SYS", receipt_status, str(ttl), f"ack:{ack_client_msg_id}"]],
-                        )
-                    else:
-                        _emit_async_table(
-                            ["Time", "Dir", "Status", "TTL", "Message"],
-                            [
-                                [
-                                    created_at_dt.isoformat(),
-                                    "SYS",
-                                    receipt_status,
-                                    str(ttl),
-                                    f"ack-miss:{ack_client_msg_id}",
-                                ]
-                            ],
-                        )
+                # 所有回执均静默处理，只更新消息状态，不打印到界面
+                # 用户可在 /refresh 查看消息历史时看到状态更新
             ack_message_ids.append(item.message_id)
             processed_count += 1
 
@@ -1015,7 +997,7 @@ async def _auto_receiver_ws_loop(runtime: ClientRuntime, identity) -> None:
                 if payload.get("type") != "NEW_MESSAGE":
                     if time.monotonic() - last_pull_at >= AUTO_PULL_WHEN_WS_HEALTHY_SECONDS:
                         try:
-                            _pull_once(runtime, identity, ack=True, output=True)
+                            _pull_once(runtime, identity, ack=True, output=False)
                         except Exception:
                             pass
                         last_pull_at = time.monotonic()
@@ -1030,7 +1012,7 @@ async def _auto_receiver_ws_loop(runtime: ClientRuntime, identity) -> None:
                 _process_incoming_messages(runtime, identity, incoming, output=True, acknowledge=False)
                 if time.monotonic() - last_pull_at >= AUTO_PULL_WHEN_WS_HEALTHY_SECONDS:
                     try:
-                        _pull_once(runtime, identity, ack=True, output=True)
+                        _pull_once(runtime, identity, ack=True, output=False)
                     except Exception:
                         pass
                     last_pull_at = time.monotonic()
@@ -1526,7 +1508,11 @@ def chat(
     else:
         with runtime.db_manager.get_session() as db:
             latest_by_contact = {}
-            for msg in db.execute(select(Message).order_by(Message.receive_at.desc())).scalars().all():
+            for msg in db.execute(
+                select(Message)
+                .where(Message.message_type == ENVELOPE_TYPE_CHAT)
+                .order_by(Message.receive_at.desc())
+            ).scalars().all():
                 latest_by_contact.setdefault(msg.conversation_id, msg.content_plaintext)
         rows = []
         for idx, friend in enumerate(friends_response.friends, start=1):
@@ -1546,19 +1532,28 @@ def chat(
     _remember_session_password(password)
     identity = ensure_local_identity(runtime.db_manager, password)
     _start_auto_receiver_if_possible(runtime)
-    try:
-        _pull_once(runtime, identity, ack=True, output=True)
-    except Exception:
-        pass
     default_ttl = 86400
     typer.echo(f"Entering chat with {selected.user_name} ({selected.uuid})")
     typer.echo(
         "Commands: /back|/exit|/quit | /refresh | /ttl <seconds> <message>. "
         "Use //text to send a message that starts with '/'."
     )
-    _show_recent_chat(runtime, selected.uuid)
+    # 设置 _ACTIVE_CHAT_CONTACT_UUID 在 _pull_once 之前，确保离线消息能收到 READ 回执
     _ACTIVE_CHAT_CONTACT_UUID = selected.uuid
-    _ACTIVE_CHAT_PROMPT = f"chat:{selected.user_name}> "
+    # 检查对方设备验证状态，构建带颜色的提示符
+    with runtime.db_manager.get_session() as db:
+        device = db.execute(
+            select(ContactDevice).where(ContactDevice.contact_uuid == selected.uuid)
+        ).scalars().first()
+    if device and device.is_verified:
+        _ACTIVE_CHAT_PROMPT = f"chat: {selected.user_name} -> {selected.uuid}({typer.style('verified', fg=typer.colors.GREEN)})> "
+    else:
+        _ACTIVE_CHAT_PROMPT = f"chat: {selected.user_name} -> {selected.uuid}({typer.style('unverified', fg=typer.colors.RED)})> "
+    try:
+        _pull_once(runtime, identity, ack=True, output=False)
+    except Exception:
+        pass
+    _show_recent_chat(runtime, selected.uuid)
     try:
         while True:
             line = input(_ACTIVE_CHAT_PROMPT).strip()
