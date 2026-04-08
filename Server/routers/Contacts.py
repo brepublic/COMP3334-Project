@@ -45,6 +45,7 @@ def _pending_info_for(db, request_row: FriendRequest, direction: Literal["incomi
         direction=direction,
         counterparty_uuid=counterparty_uuid,
         counterparty_name=counterparty.user_name if counterparty else "Unknown",
+        email=counterparty.email if counterparty else None,
     )
 
 @router.post("/friends/request", response_model=StandardResponse)

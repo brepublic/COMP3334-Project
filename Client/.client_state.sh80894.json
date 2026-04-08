@@ -1,7 +1,8 @@
 {
-  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhMTQ5NGFlMS1kN2ExLTRhYzktOGFhOC1iMDg4NmViZGQyYjciLCJpYXQiOjE3NzU1NjU4OTUsImV4cCI6MTc3NjE3MDY5NSwianRpIjoiNzkzNWFkZDktZWFhYy00YmJiLTkxM2ItM2JjZjYwNTI3NTk1In0.cle8lUH4L2g4f7iK5axGcXAcEDe_v-CgsuJ8af66f3E",
   "token_type": "bearer",
-  "user_uuid": "a1494ae1-d7a1-4ac9-8aa8-b0886ebdd2b7",
+  "user_uuid": "a89ae2b1-1356-4c26-a8f2-00431ddf6cac",
   "user_name": "sb",
-  "local_device_id": "b5fe7baa-a1e2-484f-9bcb-2bd3de747962"
+  "local_device_id": "b5fe7baa-a1e2-484f-9bcb-2bd3de747962",
+  "access_token_encrypted": "WtZEi2oH3PowX+CJqPs5sr6co6dg6QEXtWEMAXiUwiSNyKkqnndvaSIP8BFOjFP83pn4c7Pxyykqklhim4XeEQSymhraQF519wkL7g1ReNKQyKfsK/VWVGkm3PffKzXhbIH/1xDKengWo1PiKSdQvkUso1nIZ8klb7KZocD9ammXkci+2+2/kRs9gWr/UZGHf7a7JpZbEYN8b5o57bxhoCZfwDDjwXlKpq8usfWGqnqsknQAgkwD5mV2pbA3WITPDRxpRIyEbFG5hFRPCPaK6MUbIo12vgbl7L5iopyrDg3w/6/ern8GttSNBHgflHdTZTpHN/dYS9eJUqWQLSWILFyJnLCqXXDUHYRLdkBLIWWq10Epx/thZvXR7w==",
+  "access_token_nonce": "5e3tz5Zhypb5cNEV"
 }

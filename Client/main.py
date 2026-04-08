@@ -367,22 +367,34 @@ def _sync_contact_keys(runtime: ClientRuntime, contact_uuid: str) -> ContactKeyS
         ).scalars().all()
         by_device_id = {item.contact_device_id: item for item in existing_devices}
         active_device_ids = {device.device_id for device in response.active_devices}
+        
         for device in response.active_devices:
             new_hash = key_fingerprint(device.device_public_key)
             current = by_device_id.get(device.device_id)
             if not current:
                 if existing_devices:
                     changed_devices.append(device.device_id)
-                db.add(
-                    ContactDevice(
-                        contact_device_id=device.device_id,
-                        contact_uuid=contact_uuid,
-                        public_key=device.device_public_key,
-                        fingerprint=new_hash,
-                        last_seen_key_hash=new_hash,
-                        is_verified=False,
+                
+                # Use UPSERT: try to insert, update if already exists
+                existing_any = db.get(ContactDevice, device.device_id)
+                if existing_any:
+                    # Device exists for another contact - update its association
+                    existing_any.contact_uuid = contact_uuid
+                    existing_any.public_key = device.device_public_key
+                    existing_any.fingerprint = new_hash
+                    existing_any.last_seen_key_hash = new_hash
+                    existing_any.is_verified = False
+                else:
+                    db.add(
+                        ContactDevice(
+                            contact_device_id=device.device_id,
+                            contact_uuid=contact_uuid,
+                            public_key=device.device_public_key,
+                            fingerprint=new_hash,
+                            last_seen_key_hash=new_hash,
+                            is_verified=False,
+                        )
                     )
-                )
                 continue
 
             if current.last_seen_key_hash and current.last_seen_key_hash != new_hash:
@@ -492,6 +504,47 @@ def _accept_inbound_counter(
         record.counter_value = max_seen
         record.recent_counters = json.dumps(sorted(recent_counters))
         return True, None
+
+
+def _latest_inbound_counter(db_manager: ClientDBManager, conversation_id: str, peer_device_id: str) -> int:
+    with db_manager.get_session() as db:
+        record = db.execute(
+            select(MessageCounter).where(
+                MessageCounter.conversation_id == conversation_id,
+                MessageCounter.peer_device_id == peer_device_id,
+                MessageCounter.direction == "INBOUND",
+            )
+        ).scalar_one_or_none()
+        return record.counter_value if record else 0
+
+
+def _update_inbound_counter(db_manager: ClientDBManager, conversation_id: str, peer_device_id: str, counter: int) -> None:
+    with db_manager.get_session() as db:
+        record = db.execute(
+            select(MessageCounter).where(
+                MessageCounter.conversation_id == conversation_id,
+                MessageCounter.peer_device_id == peer_device_id,
+                MessageCounter.direction == "INBOUND",
+            )
+        ).scalar_one_or_none()
+        if not record:
+            record = MessageCounter(
+                conversation_id=conversation_id,
+                peer_device_id=peer_device_id,
+                direction="INBOUND",
+                counter_value=counter,
+                recent_counters=json.dumps([counter]),
+            )
+            db.add(record)
+        else:
+            max_seen = record.counter_value or 0
+            if counter > max_seen:
+                record.counter_value = counter
+                recent_counters = set()
+                if record.recent_counters:
+                    recent_counters = {int(v) for v in json.loads(record.recent_counters)}
+                recent_counters.add(counter)
+                record.recent_counters = json.dumps(sorted(recent_counters))
 
 
 def _is_seen_message(db_manager: ClientDBManager, client_msg_id: str) -> bool:
@@ -879,7 +932,8 @@ def _process_incoming_messages(
                     status=receipt_status,
                     ack_client_msg_id=ack_client_msg_id,
                 )
-                if output:
+                # READ回执静默处理，只更新状态不打印；其他回执按需打印
+                if output and receipt_status != RECEIPT_STATUS_READ:
                     if updated:
                         _emit_async_table(
                             ["Time", "Dir", "Status", "TTL", "Message"],
@@ -1237,15 +1291,47 @@ def pending(direction: str = typer.Option("incoming", "--direction", case_sensit
         typer.echo("No pending requests.")
         return
 
-    rows = [[req.request_id, req.direction, req.counterparty_name, req.counterparty_uuid] for req in requests]
-    _print_columns(["RequestID", "Direction", "Counterparty", "CounterpartyUUID"], rows)
+    typer.secho("Idx\tUsername\tEmail", bold=True)
+    for idx, req in enumerate(requests, start=1):
+        email = req.email if req.email else "-"
+        typer.echo(f"{idx}\t{req.counterparty_name}\t{email}")
 
 
 @app.command()
-def accept(request_id: str):
-    """Accept a pending friend request."""
+def accept(
+    identifier: str = typer.Argument(..., help="Email or index of the request to accept"),
+    index: bool = typer.Option(False, "--index", help="Treat identifier as local index instead of email"),
+):
+    """Accept a pending friend request by email or index."""
     runtime = build_runtime()
     require_login(runtime)
+    api = build_api(runtime)
+    try:
+        requests = run_api_call(lambda: api.pending_requests("incoming"))
+    finally:
+        api.close()
+
+    request_id = None
+    if index:
+        try:
+            idx = int(identifier)
+            if 1 <= idx <= len(requests):
+                request_id = requests[idx - 1].request_id
+            else:
+                typer.secho(f"Invalid index. Must be between 1 and {len(requests)}.", fg="red")
+                return
+        except ValueError:
+            typer.secho("Index must be a number.", fg="red")
+            return
+    else:
+        for req in requests:
+            if req.email == identifier:
+                request_id = req.request_id
+                break
+        if not request_id:
+            typer.secho(f"No pending request found for email: {identifier}", fg="red")
+            return
+
     api = build_api(runtime)
     try:
         response = run_api_call(

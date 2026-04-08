@@ -54,6 +54,7 @@ class PendingRequestInfo(BaseModel):
     direction: Literal["incoming", "outgoing"]
     counterparty_uuid: str
     counterparty_name: str
+    email: Optional[EmailStr] = None
 
 class FriendInfo(BaseModel):
     uuid: str
