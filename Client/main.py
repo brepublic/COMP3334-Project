@@ -3,6 +3,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import shlex
 import sys
 import threading
@@ -297,6 +298,65 @@ def _format_fingerprint_for_display(fingerprint: str | None) -> str:
     return " ".join(cleaned[idx : idx + 4] for idx in range(0, len(cleaned), 4))
 
 
+def _parse_device_selection(raw: str) -> list[int]:
+    """Parse user input for device selection.
+
+    Supports:
+      - single number: 1
+      - comma-separated: 1, 2, 3
+      - space-separated: 1 2 3
+      - range: 1-4
+      - mixed: 1, 3-5, 7
+
+    Returns sorted, deduplicated 1-based index list.
+    Raises typer.BadParameter on parse failure.
+    """
+    raw = raw.strip()
+    if not raw:
+        raise typer.BadParameter("Selection cannot be empty.")
+
+    parts: list[str] = []
+    # Split by commas first, then further split each part by whitespace.
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        # Normalise spaces around '-' so "2 - 5" becomes "2-5" before splitting on spaces.
+        token = re.sub(r"\s*-\s*", "-", token)
+        if " " in token:
+            parts.extend(token.split())
+        else:
+            parts.append(token)
+
+    indices: list[int] = []
+    for token in parts:
+        if "-" in token:
+            bounds = token.split("-", 1)
+            if len(bounds) != 2:
+                raise typer.BadParameter(f"Invalid range: {token!r}.")
+            try:
+                lo = int(bounds[0].strip())
+                hi = int(bounds[1].strip())
+            except ValueError:
+                raise typer.BadParameter(f"Invalid range: {token!r}.")
+            if lo < 1 or hi < lo:
+                raise typer.BadParameter(f"Invalid range: {token!r}.")
+            indices.extend(range(lo, hi + 1))
+        else:
+            try:
+                indices.append(int(token))
+            except ValueError:
+                raise typer.BadParameter(f"Invalid selection: {token!r}.")
+
+    seen: set[int] = set()
+    result: list[int] = []
+    for idx in sorted(indices):
+        if idx not in seen:
+            seen.add(idx)
+            result.append(idx)
+    return result
+
+
 def _choose_friend_by_username(friends: list, username: str):
     matches = [f for f in friends if f.user_name == username]
     if not matches:
@@ -306,7 +366,8 @@ def _choose_friend_by_username(friends: list, username: str):
     return _select_friend_interactively(matches, "Multiple users share this username:")
 
 
-def _resolve_contact_uuid(runtime: ClientRuntime, contact_identifier: str) -> str:
+def _resolve_contact_uuid(runtime: ClientRuntime, contact_identifier: str) -> tuple[str, str, str]:
+    """Resolve contact identifier to (uuid, email, name). Returns (uuid, email, name)."""
     api = build_api(runtime)
     try:
         friends_response = run_api_call(api.list_friends)
@@ -316,22 +377,24 @@ def _resolve_contact_uuid(runtime: ClientRuntime, contact_identifier: str) -> st
     # Prefer exact UUID match first.
     uuid_matches = [f for f in friends_response.friends if f.uuid == contact_identifier]
     if len(uuid_matches) == 1:
-        return uuid_matches[0].uuid
+        friend = uuid_matches[0]
+        return (friend.uuid, str(friend.email or ""), friend.user_name)
 
     email_matches = [
         f for f in friends_response.friends if (f.email or "").lower() == contact_identifier.lower()
     ]
     if len(email_matches) == 1:
-        return email_matches[0].uuid
+        friend = email_matches[0]
+        return (friend.uuid, str(friend.email or ""), friend.user_name)
     if len(email_matches) > 1:
         selected = _select_friend_interactively(email_matches, "Multiple users share this email:")
         if not selected:
             raise typer.BadParameter("Could not resolve contact from email.")
-        return selected.uuid
+        return (selected.uuid, str(selected.email or ""), selected.user_name)
 
     selected_by_username = _choose_friend_by_username(friends_response.friends, contact_identifier)
     if selected_by_username:
-        return selected_by_username.uuid
+        return (selected_by_username.uuid, str(selected_by_username.email or ""), selected_by_username.user_name)
 
     raise typer.BadParameter("Contact not found. Use UUID, email, or username from friends list.")
 
@@ -1328,10 +1391,40 @@ def accept(
 
 
 @app.command()
-def decline(request_id: str):
-    """Decline a pending friend request."""
+def decline(
+    identifier: str = typer.Argument(..., help="Email or index of the request to decline"),
+    index: bool = typer.Option(False, "--index", help="Treat identifier as local index instead of email"),
+):
+    """Decline a pending friend request by email or index."""
     runtime = build_runtime()
     require_login(runtime)
+    api = build_api(runtime)
+    try:
+        requests = run_api_call(lambda: api.pending_requests("incoming"))
+    finally:
+        api.close()
+
+    request_id = None
+    if index:
+        try:
+            idx = int(identifier)
+            if 1 <= idx <= len(requests):
+                request_id = requests[idx - 1].request_id
+            else:
+                typer.secho(f"Invalid index. Must be between 1 and {len(requests)}.", fg="red")
+                return
+        except ValueError:
+            typer.secho("Index must be a number.", fg="red")
+            return
+    else:
+        for req in requests:
+            if req.email == identifier:
+                request_id = req.request_id
+                break
+        if not request_id:
+            typer.secho(f"No pending request found for email: {identifier}", fg="red")
+            return
+
     api = build_api(runtime)
     try:
         response = run_api_call(
@@ -1345,10 +1438,40 @@ def decline(request_id: str):
 
 
 @app.command("cancel-request")
-def cancel_request(request_id: str):
-    """Cancel an outgoing pending friend request."""
+def cancel_request(
+    identifier: str = typer.Argument(..., help="Email or index of the request to cancel"),
+    index: bool = typer.Option(False, "--index", help="Treat identifier as local index instead of email"),
+):
+    """Cancel an outgoing pending friend request by email or index."""
     runtime = build_runtime()
     require_login(runtime)
+    api = build_api(runtime)
+    try:
+        requests = run_api_call(lambda: api.pending_requests("outgoing"))
+    finally:
+        api.close()
+
+    request_id = None
+    if index:
+        try:
+            idx = int(identifier)
+            if 1 <= idx <= len(requests):
+                request_id = requests[idx - 1].request_id
+            else:
+                typer.secho(f"Invalid index. Must be between 1 and {len(requests)}.", fg="red")
+                return
+        except ValueError:
+            typer.secho("Index must be a number.", fg="red")
+            return
+    else:
+        for req in requests:
+            if req.email == identifier:
+                request_id = req.request_id
+                break
+        if not request_id:
+            typer.secho(f"No pending request found for email: {identifier}", fg="red")
+            return
+
     api = build_api(runtime)
     try:
         response = run_api_call(lambda: api.cancel_friend_request(request_id))
@@ -1546,9 +1669,9 @@ def chat(
             select(ContactDevice).where(ContactDevice.contact_uuid == selected.uuid)
         ).scalars().first()
     if device and device.is_verified:
-        _ACTIVE_CHAT_PROMPT = f"chat: {selected.user_name} -> {selected.uuid}({typer.style('verified', fg=typer.colors.GREEN)})> "
+        _ACTIVE_CHAT_PROMPT = f"chat: {runtime.state.user_name} -> {selected.user_name}({typer.style('verified', fg=typer.colors.GREEN)})> "
     else:
-        _ACTIVE_CHAT_PROMPT = f"chat: {selected.user_name} -> {selected.uuid}({typer.style('unverified', fg=typer.colors.RED)})> "
+        _ACTIVE_CHAT_PROMPT = f"chat: {runtime.state.user_name} -> {selected.user_name}({typer.style('unverified', fg=typer.colors.RED)})> "
     try:
         _pull_once(runtime, identity, ack=True, output=False)
     except Exception:
@@ -1632,17 +1755,7 @@ def _show_fingerprints_impl(
     """Show device fingerprints and verification state for a contact."""
     runtime = build_runtime()
     require_login(runtime)
-    contact_uuid = _resolve_contact_uuid(runtime, contact_identifier)
-    contact_email = contact_uuid
-    api = build_api(runtime)
-    try:
-        friends_response = run_api_call(api.list_friends)
-    finally:
-        api.close()
-    for friend in friends_response.friends:
-        if friend.uuid == contact_uuid:
-            contact_email = str(friend.email) if friend.email else friend.uuid
-            break
+    contact_uuid, contact_email, contact_name = _resolve_contact_uuid(runtime, contact_identifier)
     if refresh:
         result = _sync_contact_keys(runtime, contact_uuid)
         _warn_changed_devices(contact_uuid, result.changed_devices)
@@ -1710,6 +1823,77 @@ def verify_device(contact_uuid: str, device_id: str):
             raise typer.BadParameter("Device not found for the specified contact.")
         record.is_verified = True
     typer.echo(f"Marked device {device_id} as verified.")
+
+
+@app.command("verify-user")
+def verify_user(
+    identifier: str = typer.Argument(..., metavar="IDENTIFIER", help="User email, UUID, or username."),
+):
+    """Interactively mark contact devices as verified for a user identified by email, UUID, or username."""
+    runtime = build_runtime()
+    require_login(runtime)
+
+    contact_uuid, contact_email, contact_name = _resolve_contact_uuid(runtime, identifier)
+
+    result = _sync_contact_keys(runtime, contact_uuid)
+    if result.changed_devices:
+        typer.secho(
+            f"[WARNING] Device key change detected for {result.changed_devices}. "
+            "Verified status has been reset for changed devices.",
+            fg=typer.colors.YELLOW,
+        )
+
+    with runtime.db_manager.get_session() as db:
+        rows = db.execute(
+            select(ContactDevice).where(ContactDevice.contact_uuid == contact_uuid)
+        ).scalars().all()
+
+    if not rows:
+        typer.echo("No device keys found for this user. Run sync-contact-keys first.")
+        raise typer.Exit()
+
+    typer.echo(f"\nContact fingerprint: {_format_fingerprint_for_display(rows[0].fingerprint)}")
+    typer.echo(f"Contact email:      {contact_email}")
+    typer.echo(f"Contact name:       {contact_name}\n")
+    typer.echo(f"{'No':<5} {'DeviceID':<40} {'Status':<12}")
+    typer.echo("-" * 60)
+    for idx, item in enumerate(rows, start=1):
+        status = typer.style("verified", fg=typer.colors.GREEN) if item.is_verified else typer.style(
+            "unverified", fg=typer.colors.YELLOW
+        )
+        typer.echo(f"{idx:<5} {item.contact_device_id:<40} {status:<12}")
+
+    typer.echo()
+    raw = typer.prompt(
+        "Select device(s) to mark as verified (e.g. 1, 3-5, 7) or 'a'/'abort' to cancel"
+    )
+
+    if raw.strip().lower() in ("a", "abort"):
+        typer.echo("Aborted.")
+        raise typer.Exit()
+
+    try:
+        selected_indices = _parse_device_selection(raw)
+    except typer.BadParameter as e:
+        raise e
+
+    out_of_range = [i for i in selected_indices if i > len(rows)]
+    if out_of_range:
+        raise typer.BadParameter(
+            f"Selection out of range: max device number is {len(rows)}."
+        )
+
+    selected_devices = [rows[i - 1] for i in selected_indices]
+
+    with runtime.db_manager.get_session() as db:
+        for dev in selected_devices:
+            record = db.get(ContactDevice, dev.contact_device_id)
+            if record:
+                record.is_verified = True
+
+    typer.echo(f"\nMarked {len(selected_devices)} device(s) as verified:")
+    for dev in selected_devices:
+        typer.echo(f"  {dev.contact_device_id}  {_format_fingerprint_for_display(dev.fingerprint)}")
 
 
 @app.command("unverified-keys")
